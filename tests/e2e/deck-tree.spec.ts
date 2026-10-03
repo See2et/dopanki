@@ -1,0 +1,36 @@
+import { test, expect } from '@playwright/test';
+import { mkdir } from 'node:fs/promises';
+
+test('deck hierarchy: nested labels, independent collapse, remembered state and parent study', async ({ page, request }) => {
+  const overview = await (await request.get('/api/overview')).json();
+  const root = overview.decks.find((d: any) => d.parentId === null && d.counts.total > 0);
+  const parent = overview.decks.find((d: any) => d.parentId === root.id && overview.decks.some((c: any) => c.parentId === d.id));
+  const child = overview.decks.find((d: any) => d.parentId === parent.id);
+  expect(root).toBeTruthy(); expect(parent).toBeTruthy(); expect(child).toBeTruthy();
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto('/');
+  const rootButton = page.locator(`[data-deck="${root.id}"]`);
+  const parentToggle = page.locator(`[data-toggle-deck="${parent.id}"]`);
+  const childButton = page.locator(`[data-deck="${child.id}"]`);
+  await expect(rootButton).toBeVisible(); await expect(childButton).toBeVisible();
+  await expect(childButton.locator('.deck-label')).toHaveText(child.label);
+  await expect(childButton).not.toContainText('::');
+  await mkdir('.local/screenshots',{ recursive: true });
+  await page.screenshot({ path: '.local/screenshots/desktop-deck-tree.png' });
+  await parentToggle.click();
+  await expect(parentToggle).toHaveAttribute('aria-expanded','false');
+  await expect(childButton).toBeHidden(); await expect(rootButton).toBeVisible();
+  await page.reload();
+  await expect(parentToggle).toHaveAttribute('aria-expanded','false'); await expect(childButton).toBeHidden();
+  await parentToggle.click(); await expect(childButton).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator('body')).toHaveJSProperty('scrollWidth',390);
+  await page.screenshot({ path: '.local/screenshots/mobile-deck-tree.png' });
+  const rootToggle = page.locator(`[data-toggle-deck="${root.id}"]`);
+  await rootToggle.click(); await expect(childButton).toBeHidden();
+  await rootButton.click();
+  await expect(page.getByRole('button',{ name: /答えを表示/ })).toBeVisible();
+  const response = await (await request.get(`/api/study/${root.id}`)).json();
+  const actualDeck = overview.decks.find((d: any) => d.id === response.card.deck.id);
+  expect(actualDeck.name === root.name || actualDeck.name.startsWith(root.name+'::')).toBe(true);
+});

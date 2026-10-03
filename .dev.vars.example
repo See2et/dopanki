@@ -1,0 +1,2 @@
+# Copy to .dev.vars and choose your own password for LAN / hosted access.
+APP_PASSWORD=""

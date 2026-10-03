@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.wrangler/
+.local/
+.astraeus/
+.venv/
+.dev.vars
+.env*
+!.env.example
+__pycache__/
+*.pyc
+test-results/
+playwright-report/
+crates/**/target/
