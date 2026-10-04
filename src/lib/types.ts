@@ -46,6 +46,20 @@ export interface DeckSummary extends Deck {
   counts: Counts; answeredToday: number;
 }
 export interface StudyResponse { card: StudyCard | null; counts: Counts; nextDue: number | null; answeredToday: number }
+export interface ProgressResponse {
+  today: string;
+  days: { date: string; answers: number }[];
+  totalStudyDays: number;
+  weekStudyDays: number;
+  todayAnswers: number;
+  tomorrow: {
+    reviewedCards: number;
+    movedBeyondTomorrow: number;
+    addedForTomorrow: number;
+    netReduction: number;
+    dueCards: number;
+  };
+}
 export function schedulerConfig(deck: Deck, collection: ImportDocument['collection']): SchedulerConfig {
   return { parameters: deck.config.parameters, desiredRetention: deck.config.desiredRetention,
     maximumInterval: deck.config.maximumInterval, learningSteps: deck.config.learningSteps,

@@ -4,6 +4,7 @@ import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { preview, schedule, studyDayBoundary, type ScheduleState } from '../lib/scheduler';
 import { schedulerConfig, type ImportDocument, type Deck, type StoredCard, type StudyResponse, type Note, type NoteType } from '../lib/types';
 import { summarizeDecks, studyScope, type DeckAnswers, type DeckTotals } from '../lib/decks';
+import { progress } from '../lib/progress';
 
 type Bindings = { DB: D1Database; MEDIA: R2Bucket; ASSETS: Fetcher; APP_PASSWORD?: string };
 type Env = ManagementEnv;
@@ -127,6 +128,10 @@ app.get('/api/overview', async c => {
   await restoreBuried(c.env.DB,meta,now);
   const decks = await deckSummaries(c.env.DB,meta,now);
   return c.json({ imported: true, decks, warnings: meta.warnings, source: meta.source, collection: meta.collection });
+});
+app.get('/api/progress', async c => {
+  const meta = await metadata(c.env.DB);
+  return c.json(meta ? await progress(c.env.DB,meta.collection,Date.now()) : null);
 });
 app.get('/api/study/:deck', async c => {
   const meta = await metadata(c.env.DB);

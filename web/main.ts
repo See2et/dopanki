@@ -2,8 +2,9 @@ import './style.css';
 import { openManager } from './manager';
 import { openStudyNote } from './study-note';
 import { escapeHtml, normalizedAnswer, renderCard, type RenderedCard } from '../src/lib/render';
-import type { DeckSummary, StudyResponse } from '../src/lib/types';
+import type { DeckSummary, StudyResponse, ProgressResponse } from '../src/lib/types';
 import { frameDocument } from './card-frame';
+import { bindProgress, progressMarkup } from './progress';
 import { feverTier, formatDopa, grantReward, loadFestival, revokeReward, saveFestival, unitIndex, unitLabel, type FestivalRecord } from './festival';
 import { finaleFx, payoffFx, playFanfare, playMedal, playPayoff, playUnit, primeSound, setSoundEnabled, silenceSound, soundEnabled, stopFireworks, sweepFx } from './fx';
 import { friendsFor, hamColors, hamster, type Mood } from './mascot';
@@ -27,6 +28,9 @@ let pending: { eventId: string; cardId: string; revision: number; rating: number
 let imported = false;
 let passwordRequired = false;
 let warnings: string[] = [];
+let progress: ProgressResponse | null = null;
+let progressError = false;
+let progressGeneration = 0;
 let errorMessage = '';
 let generation = 0;
 let deckQuery = '';
@@ -117,6 +121,32 @@ function shell(content: string, mode: 'home' | 'study') {
     announce(on ? '音をオンにしました。' : '音をオフにしました。効果音と自動読み上げを止めます。');
   });
 }
+function progressSlot(mode: 'home' | 'summary') {
+  return `<div data-progress-slot="${mode}">${progressMarkup(progress,progressError,mode)}</div>`;
+}
+function bindProgressSlots() {
+  document.querySelectorAll('[data-progress-slot]').forEach(slot => bindProgress(slot, () => void refreshProgress()));
+}
+async function refreshProgress() {
+  const request = ++progressGeneration;
+  progress = null; progressError = false;
+  const paint = () => {
+    document.querySelectorAll<HTMLElement>('[data-progress-slot]').forEach(slot => {
+      slot.innerHTML = progressMarkup(progress,progressError,slot.dataset.progressSlot as 'home' | 'summary');
+    });
+    bindProgressSlots();
+  };
+  paint();
+  try {
+    const data = await api<ProgressResponse | null>('/api/progress');
+    if (request !== progressGeneration) return;
+    progress = data;
+  } catch {
+    if (request !== progressGeneration) return;
+    progressError = true;
+  }
+  paint();
+}
 function statusMarkup() { return errorMessage ? `<div class="error" role="alert">${escapeHtml(errorMessage)}</div>` : ''; }
 async function leave(farewell = false) {
   if (saving || pending || editingNote) return;
@@ -131,6 +161,7 @@ async function leave(farewell = false) {
 async function logout() {
   if (saving || pending || editingNote) return;
   generation++; busy = false; skippedNote = false; noteNotice = ''; answeredCard = null; undoNote = ''; resultNote = null; stopEffects(); clearMedalNotices();
+  progressGeneration++; progress = null; progressError = false;
   await api('/api/logout', {}); sessionStorage.removeItem('dopanki_undo'); lastEvent = null; login();
 }
 function startDeck(id: string) {
@@ -204,6 +235,12 @@ function medalStrip(compact = false) {
   return `<section class="medal-strip${compact ? ' is-compact' : ''}" aria-label="このセッションの勲章"><div class="medal-strip-text"><p class="medal-strip-label">このセッションの勲章</p><p class="medal-strip-count"><b>${earned.size}</b> / ${MEDALS.length}</p></div>
     <div class="medal-strip-row" aria-hidden="true">${MEDALS.map(m => `<span class="mini-medal">${medalArt(m.id,earned.has(m.id))}</span>`).join('')}</div>
     <button class="secondary medal-open" id="open-medals">一覧</button></section>`;
+}
+/** Home keeps the session medals to one compact button; the list dialog shows every condition. */
+function medalChip() {
+  const earned = new Set(medals.earnedIds);
+  const latest = medals.earnedIds.at(-1);
+  return `<button class="medal-strip medal-chip" id="open-medals" aria-haspopup="dialog" aria-label="このセッションの勲章 ${earned.size} / ${MEDALS.length}、一覧を開く" title="このセッションの勲章の一覧を開く"><span class="medal-chip-art" aria-hidden="true">${medalArt(latest ?? MEDALS[0].id,!!latest)}</span><span class="medal-chip-text"><small>このセッションの勲章</small><span class="medal-strip-count"><b>${earned.size}</b> / ${MEDALS.length}</span></span><span class="medal-chip-open" aria-hidden="true">一覧</span></button>`;
 }
 function openMedalDialog() {
   document.querySelector('#medal-dialog')?.remove();
@@ -280,18 +317,25 @@ function overview() {
   const lastId = readLastDeck();
   const last = decks.find(d => d.id === lastId && d.counts.total > 0);
   const lastDue = last ? last.counts.new + last.counts.learning + last.counts.review : 0;
+  const due = sum('new') + sum('learning') + sum('review');
   const date = new Intl.DateTimeFormat('ja-JP',{ month: 'long', day: 'numeric', weekday: 'short' }).format(new Date());
-  shell(`<section class="home-head"><div><p class="home-date">${date}</p><h1>今日の復習</h1></div>
-      ${imported ? `<dl class="due-summary" aria-label="今日の件数"><div class="new"><dt>新規</dt><dd>${sum('new')}</dd></div><div class="learning"><dt>学習</dt><dd>${sum('learning')}</dd></div><div class="review"><dt>復習</dt><dd>${sum('review')}</dd></div><div class="done"><dt>回答済み</dt><dd>${today}</dd></div></dl>` : ''}</section>
+  // One place answers "how much is left, and where do I start"; records and medals stay one tap away.
+  const todayPanel = `<section class="today-panel" aria-label="今日の件数">
+      <div class="today-total"><p class="today-label">今日の残り</p><p class="today-due"><b>${due.toLocaleString()}</b><small>枚</small></p>
+        <dl class="due-summary"><div class="new"><dt>新規</dt><dd>${sum('new')}</dd></div><div class="learning"><dt>学習</dt><dd>${sum('learning')}</dd></div><div class="review"><dt>復習</dt><dd>${sum('review')}</dd></div><div class="done"><dt>回答済み</dt><dd>${today}</dd></div></dl></div>
+      ${last ? `<section class="resume" aria-label="続きから"><div class="resume-text"><p class="resume-label">続きから</p><p class="resume-name">${escapeHtml(deckPath(last))}</p><p class="resume-counts">${countMarkup(last)}</p></div><button class="primary resume-start" data-resume="${escapeHtml(last.id)}">${lastDue ? '学習する' : '開く'}</button></section>`
+        : `<p class="today-hint">${due ? '下のデッキを選ぶと学習が始まります。' : 'いま出題できるカードはありません。'}</p>`}
+    </section>`;
+  shell(`<section class="home-head"><div><p class="home-date">${date}</p><h1>今日の復習</h1></div>${imported ? medalChip() : ''}</section>
     ${restNote ? `<p class="rest-note" role="status">${hamster('happy')}<span>${escapeHtml(restNote)}</span></p>` : ''}${statusMarkup()}
-    ${imported ? `${last ? `<section class="resume" aria-label="続きから"><div class="resume-text"><p class="resume-label">続きから</p><p class="resume-name">${escapeHtml(deckPath(last))}</p><p class="resume-counts">${countMarkup(last)}</p></div><button class="primary resume-start" data-resume="${escapeHtml(last.id)}">${lastDue ? '学習する' : '開く'}</button></section>` : ''}${medalStrip()}
+    ${imported ? `${todayPanel}<section class="home-records" aria-label="学習の記録">${progressSlot('home')}</section>
       <section class="deck-panel"><div class="deck-panel-head"><h2>デッキ</h2><label class="deck-search"><span class="sr-only">デッキを検索</span><input id="deck-search" type="search" autocomplete="off" placeholder="デッキを検索" value="${escapeHtml(deckQuery)}"><kbd aria-hidden="true">/</kbd></label></div>
         <div class="deck-tree-heading" aria-hidden="true"><span>名前</span><span class="new">新規</span><span class="learning">学習</span><span class="review">復習</span></div>
         <ul class="deck-tree" id="deck-tree" aria-label="デッキ一覧">${deckRows()}</ul></section>`
     : `<section class="empty-import"><h2>Ankiの教材を引き継ぐ</h2><p>PCでAnkiパッケージを取り込むと、ここにデッキが表示されます。カード・学習履歴・FSRS設定を一緒に移行できます。</p><code>npm run import:anki -- /path/to/deck.apkg</code><button class="secondary" id="reload">取り込み後に更新</button></section>`}
     ${warnings.length ? `<details class="import-notes"><summary>移行時の確認事項 <span>${warnings.length}</span></summary><ul>${warnings.map(w => `<li>${escapeHtml(w.includes('global FSRS switch') ? '元データにFSRSの有効設定がないため、保存された記憶状態からFSRSを使用していると判断しました。パラメータは保持されています。' : w.includes('omits rollover') ? '元データに日付の切り替わり時刻がないため、午前4時として移行しました。Ankiで別の時刻を設定していた場合は、取り込み時に指定してください。' : w)}</li>`).join('')}</ul></details>` : ''}
     <p class="home-note">学習するとドパハムと「ドパ」が盛り上げます。ドパは演出用の遊びの点数で、どの評価でも同じだけ増え、記憶の強さや正答率は表しません。</p>`,'home');
-  bindDeckRows();
+  bindDeckRows(); bindProgressSlots();
   document.querySelector('[data-resume]')?.addEventListener('click', event => startDeck((event.currentTarget as HTMLElement).dataset.resume!));
   document.querySelector('#open-medals')?.addEventListener('click', openMedalDialog);
   document.querySelector<HTMLInputElement>('#deck-search')?.addEventListener('input', event => { deckQuery = (event.target as HTMLInputElement).value; renderDeckRows(); });
@@ -373,7 +417,7 @@ function study() {
       ${celebrate ? `<div class="finale-pop" aria-hidden="true">${hamster('wow')}</div>` : ''}
       <p class="finale-title">完了!</p><h1>いまの復習は完了です</h1>
       <dl class="finale-stats"><div><dt>今日の回答</dt><dd>${current.answeredToday}<small>回</small></dd></div><div><dt>この祭りのドパ</dt><dd>${formatDopa(festival.total)}</dd></div><div><dt>ドパを集めた回数</dt><dd>${festival.count}<small>回</small></dd></div><div><dt>次の復習</dt><dd class="finale-next">${current.nextDue ? formatTime(current.nextDue) : '次の学習日'}</dd></div></dl>
-      ${medalStrip(true)}
+      ${progressSlot('summary')}${medalStrip(true)}
       <p class="finale-note">どの評価でも同じだけドパが入ります。ドパは記憶の強さを表しません。</p>
       <div class="finale-actions"><button class="primary" id="check-again">もう一度確認</button><button class="secondary" id="finale-home">デッキ一覧へ</button></div></section>`,'study');
     document.querySelector('#finale-home')?.addEventListener('click', () => void leave());
@@ -413,6 +457,7 @@ function study() {
     document.querySelector('#suspend-study-note')?.addEventListener('click', () => void manageStudyNote('suspend'));
     audioControls(rendered);
   }
+  bindProgressSlots();
   document.querySelector('#back')?.addEventListener('click', () => void leave());
   document.querySelector('#undo')?.addEventListener('click', () => void undo());
   document.querySelector('#check-again')?.addEventListener('click', () => void loadCard());
@@ -568,6 +613,7 @@ function audioControls(rendered: RenderedCard) {
   }
 }
 async function refresh() {
+  void refreshProgress();
   try {
     const data = await api<{ imported: boolean; decks: DeckSummary[]; warnings: string[] }>('/api/overview');
     decks = data.decks; imported = data.imported; warnings = data.warnings;
@@ -576,6 +622,9 @@ async function refresh() {
 }
 async function loadCard() {
   if (!selected) return;
+  // Every queue reload can reflect a suspension, rollover or another screen's updates.
+  // Keep the aggregate fresh without making it a prerequisite for learning.
+  void refreshProgress();
   const request = ++generation;
   busy = true; errorMessage = '';
   try {

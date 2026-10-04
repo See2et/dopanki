@@ -11,6 +11,7 @@ class Mock {
   reviews: any[] = [];
   fail: 'save' | 'conflict' | 'load' | 'study' | 'lost' | null = null;
   empty = false;
+  pendingTomorrow = 2;
   saved = new Map<string, unknown>();
   async attach(page: Page) {
     await page.route('**/api/**', async route => {
@@ -18,6 +19,7 @@ class Mock {
       const json = (data: unknown, status = 200) => route.fulfill({ json: data, status });
       if (path === '/api/session') return json({ authenticated: true, passwordRequired: false });
       if (path === '/api/overview') return json({ imported: true, warnings: [], decks: [{ ...deck, parentId: null, depth: 0, label: deck.name, counts: { new: 2, learning: 0, review: 0, total: 2 }, answeredToday: 0 }] });
+      if (path === '/api/progress') return json({ today: '2026-10-04', days: [{ date: '2026-10-04', answers: 0 }], totalStudyDays: 0, weekStudyDays: 0, todayAnswers: 0, tomorrow: { reviewedCards: 0, movedBeyondTomorrow: 0, addedForTomorrow: 0, netReduction: 0, dueCards: this.pendingTomorrow - (this.note.cards[0].suspended ? 2 : 0) } });
       if (path === '/api/manage/note-types') return json({ noteTypes: [type] });
       if (path === '/api/manage/notes/note') {
         if (route.request().method() === 'GET') {
@@ -143,6 +145,11 @@ test('suspension confirms all siblings, preserves rewards and undo, and safely r
 test('suspending last note completes quietly without rewards', async ({ page }) => {
   const mock = new Mock(); mock.empty = true; await mock.attach(page); await page.getByRole('button', { name: '出題停止', exact: true }).click(); await page.getByRole('button', { name: 'すべて出題停止して次へ' }).click();
   await expect(page.locator('#finale')).toBeVisible(); await expect(page.locator('#finale')).not.toHaveClass(/is-celebrating/); expect(mock.reviews).toEqual([]); await expect(page.locator('.dopa-counter')).toHaveAttribute('data-dopa-total','0');
+  await expect(page.locator('.tomorrow-stats dd').last()).toHaveText('0枚');
+  // Explicit recheck must also refresh the aggregate when another card's schedule changes.
+  mock.pendingTomorrow = 5;
+  await page.locator('#check-again').click();
+  await expect(page.locator('.tomorrow-stats dd').last()).toHaveText('3枚');
 });
 
 test('study editor and suspension fit desktop and mobile', async ({ page }) => {
