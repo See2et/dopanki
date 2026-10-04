@@ -10,7 +10,7 @@ export interface NoteType {
   id: string; name: string; kind: 'normal' | 'cloze'; fields: string[];
   templates: { name: string; front: string; back: string }[]; css: string;
 }
-export interface Note { id: string; guid: string; noteTypeId: string; fields: string[]; tags: string[] }
+export interface Note { id: string; guid: string; noteTypeId: string; fields: string[]; tags: string[]; contentFormat?: 'plain' | 'html' }
 export interface ImportedCard {
   id: string; noteId: string; deckId: string; ordinal: number; type: number; queue: number;
   due: number; interval: number; easeFactor: number; reps: number; lapses: number; left: number;

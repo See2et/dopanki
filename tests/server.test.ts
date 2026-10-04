@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { DatabaseSync } from 'node:sqlite';
+import { TestDb } from './test-db';
 import { readFileSync } from 'node:fs';
 import { app } from '../src/server/index';
 import { fixture } from './fixture';
@@ -7,32 +7,11 @@ import { importStatements, initialSchedule, validateImport } from '../src/lib/im
 import type { ImportDocument, ImportedCard, DeckSummary, StudyResponse } from '../src/lib/types';
 
 /** Real SQLite persistence; only the D1 transport is adapted to the local test runtime. */
-class TestDb {
-  sqlite = new DatabaseSync(':memory:');
-  queries = 0;
-  prepare(sql: string) {
-    this.queries++;
-    const db = this.sqlite;
-    let args: (string | number | null)[] = [];
-    const statement = {
-      bind(...values: (string | number | null)[]) { args = values; return statement; },
-      async first() { return db.prepare(sql).get(...args) ?? null; },
-      async all() { return { results: db.prepare(sql).all(...args), success: true, meta: {} }; },
-      async run() { const result = db.prepare(sql).run(...args); return { results: [], success: true, meta: { changes: Number(result.changes) } }; },
-    };
-    return statement;
-  }
-  async batch(statements: ReturnType<TestDb['prepare']>[]) {
-    this.sqlite.exec('BEGIN');
-    try { const results = []; for (const statement of statements) results.push(await statement.run()); this.sqlite.exec('COMMIT'); return results; }
-    catch (error) { this.sqlite.exec('ROLLBACK'); throw error; }
-  }
-}
 let db: TestDb;
 function request(path: string, body?: unknown, secret?: string, headers?: Record<string,string>) {
   return app.request(`http://localhost${path}`, body === undefined ? { headers } : { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) }, { DB: db as unknown as D1Database, APP_PASSWORD: secret, MEDIA: {} as R2Bucket, ASSETS: {} as Fetcher });
 }
-beforeEach(() => { db = new TestDb(); db.sqlite.exec(readFileSync('migrations/0001_initial.sql','utf8')); db.sqlite.exec(importStatements(fixture()).join(';')+';'); });
+beforeEach(() => { db = new TestDb(); db.sqlite.exec(readFileSync('migrations/0001_initial.sql','utf8')); db.sqlite.exec(readFileSync('migrations/0003_authoring.sql','utf8')); db.sqlite.exec(importStatements(fixture()).join(';')+';'); });
 afterEach(() => { db.sqlite.close(); vi.useRealTimers(); });
 describe('migration and review persistence contracts', () => {
   it('keeps imported IDs, due, FSRS memory, template and history intact', async () => {

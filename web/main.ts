@@ -1,4 +1,5 @@
 import './style.css';
+import { openManager } from './manager';
 import { escapeHtml, normalizedAnswer, renderCard, type RenderedCard } from '../src/lib/render';
 import type { DeckSummary, StudyResponse } from '../src/lib/types';
 import { frameDocument } from './card-frame';
@@ -95,7 +96,13 @@ function soundButton() {
 }
 function shell(content: string, mode: 'home' | 'study') {
   const chip = mode === 'home' && festival.count ? `<span class="bar-dopa" data-dopa-total="${festival.total}" title="ドパは演出用の遊びの点数です"><small>ドパ</small><b>${formatDopa(festival.total)}</b></span>` : '';
-  root.innerHTML = `<header class="app-bar"><div class="app-bar-inner"><button class="brand" id="home" aria-label="デッキ一覧へ">${hamster('calm')}<span>Dopanki</span></button><div class="bar-actions">${chip}${soundButton()}<a href="/api/export" class="bar-link" title="教材と学習状態をJSONで保存">バックアップ</a>${passwordRequired ? '<button class="bar-link" id="logout">ログアウト</button>' : ''}</div></div></header><main class="${mode}">${content}</main>`;
+  root.innerHTML = `<header class="app-bar"><div class="app-bar-inner"><button class="brand" id="home" aria-label="デッキ一覧へ">${hamster('calm')}<span>Dopanki</span></button><div class="bar-actions">${chip}${soundButton()}<button class="bar-link" id="open-manager">教材管理</button><a href="/api/export" class="bar-link" title="教材と学習状態をJSONで保存">バックアップ</a>${passwordRequired ? '<button class="bar-link" id="logout">ログアウト</button>' : ''}</div></div></header><main class="${mode}">${content}</main>`;
+  document.querySelector('#open-manager')?.addEventListener('click', () => {
+    if (saving || pending) return;
+    generation++; busy = false; answeredCard = null; undoNote = ''; resultNote = null;
+    stopEffects(); clearMedalNotices(); current = null; selected = null;
+    openManager(root, { imported, back: refresh });
+  });
   document.querySelector('#home')?.addEventListener('click', () => void leave());
   document.querySelector('#logout')?.addEventListener('click', () => void logout());
   document.querySelector<HTMLButtonElement>('#sound-toggle')?.addEventListener('click', event => {

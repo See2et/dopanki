@@ -10,7 +10,7 @@
     "build:web": "vite build",
     "build": "npm run build:web && wrangler deploy --dry-run",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --root . --exclude 'tests/e2e/**'",
+    "test": "vitest run --root . --exclude 'tests/e2e/**' --exclude '.local/**'",
     "test:e2e": "playwright test",
     "db:migrate": "wrangler d1 migrations apply dopanki --local",
     "import:anki": "tsx src/tools/import-anki.ts",

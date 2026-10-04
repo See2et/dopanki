@@ -1,6 +1,6 @@
 # Dopanki
 
-Ankiの教材と学習状態を引き継ぎ、スマホ・PCからFSRSで復習するWebアプリです。オンライン利用を前提とします。回答のたびにマスコットと膨らみ続ける数字「ドパ」が盛り上げる演出があります。高品質AI音声の生成は含みません。
+Ankiの教材と学習状態を引き継ぎ、スマホ・PCからFSRSで復習するWebアプリです。Dopanki内で教材を作成・編集でき、AIから同じ教材管理APIも利用できます。オンライン利用を前提とします。回答のたびにマスコットと膨らみ続ける数字「ドパ」が盛り上げる演出があります。高品質AI音声の生成は含みません。
 
 ## ローカルで使う
 
@@ -8,11 +8,11 @@ Node.js 24以降、Python 3.10〜3.13、[uv](https://docs.astral.sh/uv/)を使�
 
 ```sh
 npm ci
-npm run import:anki -- /path/to/deck.apkg
+npm run db:migrate
 npm run dev
 ```
 
-PCでは http://localhost:8787 を開きます。今回提供された韓国語デッキは、すでにこの作業環境のローカルDBへ取り込み済みです。Ankiの元ファイルは変更しません。
+PCでは http://localhost:8787 を開きます。「教材管理」から学習日を設定し、デッキとノートタイプを作成すると、Ankiファイルなしでも始められます。Ankiから移行する場合は、初期設定の前に`npm run import:anki -- /path/to/deck.apkg`を実行してください。今回提供された韓国語デッキは、すでにこの作業環境のローカルDBへ取り込み済みです。Ankiの元ファイルは変更しません。
 
 通常の開発サーバーとViteは127.0.0.1だけで待ち受けます。スマホから使う場合は、`.dev.vars`にパスワードを設定し、専用のLAN起動コマンドを使います。同じWi-FiからWranglerが表示するLANアドレスを開いてください。
 
@@ -43,6 +43,21 @@ npm run import:anki -- /path/to/deck.apkg --timezone Asia/Tokyo --day-start 4
 - 同じDBへの再取り込みは停止します。継続中の学習状態を上書きしません。取り込み失敗時は教材を公開せず、同じ操作の再実行で未完了分を読み直せます。取り込みコマンドは同時に実行しないでください。
 
 変換結果は`.local/import/collection.json`、メディアは`.local/import/media/`です。`.local`、`.wrangler`、`.dev.vars`はGitに含みません。
+
+## 教材の作成・編集
+
+上部の「教材管理」からノート・ノートタイプ・デッキ・APIトークンを管理します。
+
+- ノートタイプごとに名前付きフィールド、必須／任意、表裏のHTMLテンプレート、CSSを定義します。入力回答は`{{type:項目名}}`、読み上げは`{{tts ko_KR:項目名}}`で指定できます。
+- 1件のノートからテンプレートごとにカードを生成します。作成・編集画面にはカードのプレビューがあります。新規入力はプレーンテキストと改行を基本とし、Anki由来のHTMLは保持します。
+- 内容・表示・フィールド順序や名前を編集しても、既存カードの復習予定・記憶状態・回答履歴は保持します。追加テンプレートのカードだけを未学習として生成します。
+- 教材は内容・タグ・デッキ・ノートタイプで検索できます。デッキ移動や出題停止・再開は同じノートの全カードへ適用します。内容の編集履歴を確認できます。
+- デッキの親や名前を変更すると、配下のデッキ名も追従します。学習上限はデッキごとに設定できます。
+- 使用中のフィールド・テンプレートは削除できません。通常形式のノートタイプの作成・編集に対応し、穴埋め形式の新規生成、教材削除、新規メディアアップロード、Anki同期は対象外です。
+
+AI用APIトークンは「APIトークン」で発行・失効できます。鍵の全文は一度だけ表示し、サーバーにはハッシュだけを保存します。教材の読み取り・編集と、ノートタイプの編集の権限を分けます。APIトークンは学習操作やバックアップ取得、トークン管理には使えません。
+
+[教材管理API仕様](docs/authoring-api.md)に認証・再送・競合・一括操作と入力例を記載しています。
 
 ## 学習機能
 
@@ -104,6 +119,8 @@ npm run import:anki -- /path/to/deck.apkg --timezone Asia/Tokyo --day-start 4
 | `src/lib/scheduler.ts` | FSRS、学習ステップ、タイムゾーンと日境界 |
 | `src/lib/render.ts` | Ankiテンプレート解釈 |
 | `src/server/index.ts` | 認証、出題、回答、取り消し、バックアップ |
+| `src/server/manage.ts` | 教材管理API、APIトークン、編集競合・再送の制御 |
+| `web/manager.ts` | 教材・ノートタイプ・デッキ・APIトークンの管理画面 |
 | `web/` | スマホ・PC対応UI。`festival.ts`がドパの計算、`fx.ts`が効果音と演出、`mascot.ts`がドパハムの絵、`medals.ts`が勲章の判定、`medal-art.ts`が勲章の名前と絵 |
 | `migrations/` | D1のDBスキーマ |
 
@@ -148,6 +165,7 @@ npx wrangler r2 bucket create dopanki-media
 ```sh
 npx wrangler secret put APP_PASSWORD
 npx wrangler d1 migrations apply dopanki --remote
+# Ankiから移行する場合だけ実行（新規作成で始める場合は省略）
 npm run import:anki -- /path/to/deck.apkg --remote
 npm run deploy
 ```

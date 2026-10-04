@@ -8,7 +8,7 @@ export interface RenderedCard {
 }
 export const escapeHtml = (s: string) => s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;');
 export function plainText(s: string): string {
-  return s.replace(/<br\s*\/?\s*>/gi,'\n').replace(/<[^>]*>/g,'').replace(/&nbsp;/g,' ').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'");
+  return s.replace(/<br\s*\/?\s*>/gi,'\n').replace(/<[^>]*>/g,'').replace(/&(?:nbsp|amp|lt|gt|quot|#39);/g,entity=>({'&nbsp;':' ','&amp;':'&','&lt;':'<','&gt;':'>','&quot;':'"','&#39;':"'"}[entity]!));
 }
 export function normalizedAnswer(s: string, ignoreAccents = false): string {
   const n = s.normalize('NFC').trim().replace(/\s+/g,' ');
@@ -67,7 +67,7 @@ export function renderCard(card: StudyCard, side: 'front' | 'back', frontHtml = 
   const template = noteType.templates[noteType.kind === 'cloze' ? 0 : ordinal];
   const result: RenderedCard = { html: '', css: noteType.css, speech: [], sounds: [], typedAnswer: null, warnings: [] };
   if (/<script\b|\son\w+\s*=/i.test(template.front + template.back)) result.warnings.push('テンプレート内のJavaScriptは実行しません。');
-  const fields = Object.fromEntries(noteType.fields.map((name,i) => [name,note.fields[i] ?? '']));
+  const fields = Object.fromEntries(noteType.fields.map((name,i) => [name,note.contentFormat === 'plain' ? escapeHtml(note.fields[i] ?? '').replace(/\r?\n/g,'<br>') : note.fields[i] ?? '']));
   Object.assign(fields, { Tags: note.tags.join(' '), Type: noteType.name, Deck: deck.name, Subdeck: deck.name.split('::').at(-1)!, Card: template.name, FrontSide: frontHtml });
   function replace(value: string): string {
     const bits = value.split(':');

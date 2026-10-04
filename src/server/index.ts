@@ -1,11 +1,12 @@
 import { Hono } from 'hono';
+import manager, { authorizeBearer, type ManagementEnv } from './manage';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { preview, schedule, studyDayBoundary, type ScheduleState } from '../lib/scheduler';
 import { schedulerConfig, type ImportDocument, type Deck, type StoredCard, type StudyResponse, type Note, type NoteType } from '../lib/types';
 import { summarizeDecks, studyScope, type DeckAnswers, type DeckTotals } from '../lib/decks';
 
 type Bindings = { DB: D1Database; MEDIA: R2Bucket; ASSETS: Fetcher; APP_PASSWORD?: string };
-type Env = { Bindings: Bindings };
+type Env = ManagementEnv;
 export const app = new Hono<Env>();
 const cookieName = 'dopanki_session';
 const encoder = new TextEncoder();
@@ -41,9 +42,13 @@ app.use('/api/*', async (c, next) => {
     if (!c.req.header('Content-Type')?.startsWith('application/json')) return c.json({ error: 'JSONリクエストが必要です。' }, 415);
   }
   if (!c.env.APP_PASSWORD && !loopback(c.req.url)) return c.json({ error: 'サーバーのAPP_PASSWORDが未設定です。' }, 503);
-  if (!['/api/session', '/api/login'].includes(c.req.path) && !await authenticated(c)) return c.json({ error: 'ログインしてください。' }, 401);
+  if (c.req.header('Authorization')) {
+    if (!await authorizeBearer(c)) return c.json({ error: 'APIトークンまたは権限が無効です。' }, 401);
+  } else if (!['/api/session', '/api/login'].includes(c.req.path) && !await authenticated(c)) return c.json({ error: 'ログインしてください。' }, 401);
+  else c.set('actor','session');
   await next();
 });
+app.route('/api/manage', manager);
 app.get('/api/session', async c => c.json({ authenticated: await authenticated(c), passwordRequired: !!c.env.APP_PASSWORD }));
 app.post('/api/login', async c => {
   const body = await c.req.json().catch(() => null) as { password?: unknown } | null;
@@ -201,8 +206,8 @@ app.post('/api/undo', async c => {
   const before = json<ScheduleState>(event.before_state);
   const marker = `undo:${body.eventId}`;
   const results = await c.env.DB.batch([
-    c.env.DB.prepare('UPDATE cards SET schedule=?,state=?,due=?,queue=?,revision=revision+1,last_event_id=? WHERE id=? AND revision=? AND last_event_id=?')
-      .bind(event.before_state,before.state,before.due,before.state === 0 ? 0 : before.state === 2 ? 2 : 1,marker,event.card_id,event.after_revision,body.eventId),
+    c.env.DB.prepare('UPDATE cards SET schedule=?,state=?,due=?,suspended_queue=CASE WHEN queue=-1 THEN ? ELSE suspended_queue END,queue=CASE WHEN queue=-1 THEN -1 ELSE ? END,revision=revision+1,last_event_id=? WHERE id=? AND revision=? AND last_event_id=?')
+      .bind(event.before_state,before.state,before.due,before.state === 0 ? 0 : before.state === 2 ? 2 : 1,before.state === 0 ? 0 : before.state === 2 ? 2 : 1,marker,event.card_id,event.after_revision,body.eventId),
     c.env.DB.prepare('UPDATE review_events SET undone=1 WHERE id=? AND EXISTS(SELECT 1 FROM cards WHERE id=? AND revision=? AND last_event_id=?)')
       .bind(body.eventId,event.card_id,event.after_revision+1,marker),
   ]);
@@ -210,17 +215,17 @@ app.post('/api/undo', async c => {
 });
 app.get('/api/export', async c => {
   const meta = await metadata(c.env.DB);
-  const [decks,types,notes,cards,history,events,media] = await Promise.all([
+  const [decks,types,notes,cards,history,events,media,contentHistory] = await Promise.all([
     c.env.DB.prepare('SELECT data FROM decks').all(), c.env.DB.prepare('SELECT data FROM note_types').all(),
-    c.env.DB.prepare('SELECT data FROM notes').all(), c.env.DB.prepare('SELECT id,original,schedule,revision,queue FROM cards').all(),
+    c.env.DB.prepare('SELECT data FROM notes').all(), c.env.DB.prepare('SELECT id,note_id,deck_id,ordinal,original,schedule,revision,queue,suspended_queue FROM cards').all(),
     c.env.DB.prepare('SELECT data FROM imported_reviews').all(), c.env.DB.prepare('SELECT * FROM review_events').all(),
-    c.env.DB.prepare('SELECT * FROM media').all(),
+    c.env.DB.prepare('SELECT * FROM media').all(), c.env.DB.prepare('SELECT * FROM content_history').all(),
   ]);
   c.header('Content-Disposition', 'attachment; filename="dopanki-backup.json"');
   return c.json({ format: 'dopanki-backup', schemaVersion: 1, exportedAt: new Date().toISOString(), metadata: meta,
     decks: decks.results.map(r => json(String(r.data))), noteTypes: types.results.map(r => json(String(r.data))),
     notes: notes.results.map(r => json(String(r.data))), cards: cards.results.map(r => ({ ...r, original: json(String(r.original)), schedule: json(String(r.schedule)) })),
-    importedReviews: history.results.map(r => json(String(r.data))), reviewEvents: events.results, media: media.results });
+    importedReviews: history.results.map(r => json(String(r.data))), reviewEvents: events.results, media: media.results, contentHistory: contentHistory.results });
 });
 app.get('/media/:name', async c => {
   if (!await authenticated(c)) return c.text('Unauthorized', 401);
