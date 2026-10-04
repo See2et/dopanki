@@ -12,7 +12,7 @@ function studyDate(timestamp: number, format: Intl.DateTimeFormat, dayStart: num
   return new Date(Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour - dayStart)).toISOString().slice(0,10);
 }
 
-/** Read-only projection: imported rated answers and non-undone Dopanki events. */
+/** Read-only projection: imported rated answers and non-undone normal and practice events. */
 export async function progress(db: D1Database, collection: ImportDocument['collection'], now: number): Promise<ProgressResponse> {
   const { timeZone, dayStart } = collection;
   const format = new Intl.DateTimeFormat('en-GB', {
@@ -21,7 +21,7 @@ export async function progress(db: D1Database, collection: ImportDocument['colle
   const today = studyDate(now,format,dayStart);
   const boundary = studyDayBoundary(now,timeZone,dayStart);
   const tomorrowEnd = nextStudyDayBoundary(nextStudyDayBoundary(now,timeZone,dayStart),timeZone,dayStart);
-  const [buckets, tomorrowResult] = await Promise.all([
+  const [buckets, tomorrowResult, practiceToday] = await Promise.all([
     // SQLite has no IANA timezone support. Aggregate by UTC day first, then split only
     // buckets that cross a local rollover; historical review rows never leave the DB.
     db.prepare(`SELECT MIN(earliest) AS earliest,MAX(latest) AS latest,SUM(answers) AS answers FROM (
@@ -32,7 +32,10 @@ export async function progress(db: D1Database, collection: ImportDocument['colle
       UNION ALL
       SELECT date(reviewed_at/1000.0,'unixepoch') AS utc_day,MIN(reviewed_at),MAX(reviewed_at),COUNT(*)
       FROM review_events WHERE undone=0 AND reviewed_at<=? GROUP BY utc_day
-    ) GROUP BY utc_day`).bind(now,now).all<DayBucket>(),
+      UNION ALL
+      SELECT date(reviewed_at/1000.0,'unixepoch') AS utc_day,MIN(reviewed_at),MAX(reviewed_at),COUNT(*)
+      FROM practice_events WHERE undone=0 AND reviewed_at<=? GROUP BY utc_day
+    ) GROUP BY utc_day`).bind(now,now,now).all<DayBucket>(),
     db.prepare(`WITH ranked AS (
       SELECT e.before_state,
         FIRST_VALUE(e.after_state) OVER(PARTITION BY e.card_id ORDER BY e.after_revision DESC) AS after_state,
@@ -50,6 +53,8 @@ export async function progress(db: D1Database, collection: ImportDocument['colle
       (SELECT COUNT(*) FROM cards WHERE queue>=0 AND state<>0 AND due<?) AS dueCards FROM changes`)
       .bind(boundary,now,tomorrowEnd,tomorrowEnd,tomorrowEnd,tomorrowEnd,tomorrowEnd,tomorrowEnd)
       .first<ProgressResponse['tomorrow']>(),
+    db.prepare('SELECT COUNT(*) AS answers FROM practice_events WHERE undone=0 AND reviewed_at>=? AND reviewed_at<=?')
+      .bind(boundary,now).first<{ answers: number }>(),
   ]);
   const answers = new Map<string,number>();
   const add = (date: string, count: number) => answers.set(date,(answers.get(date) ?? 0)+count);
@@ -77,7 +82,9 @@ export async function progress(db: D1Database, collection: ImportDocument['colle
           AND json_extract(data,'$.reviewedAt')<=?)
         + (SELECT COUNT(*) FROM review_events WHERE deck_id IN (SELECT deck_id FROM event_decks)
           AND undone=0 AND reviewed_at>=ranges.start AND reviewed_at<ranges.end AND reviewed_at<=?)
-      ) AS answers FROM ranges GROUP BY date`).bind(JSON.stringify(split),now,now).all<{ date: string; answers: number }>();
+        + (SELECT COUNT(*) FROM practice_events
+          WHERE undone=0 AND reviewed_at>=ranges.start AND reviewed_at<ranges.end AND reviewed_at<=?)
+      ) AS answers FROM ranges GROUP BY date`).bind(JSON.stringify(split),now,now,now).all<{ date: string; answers: number }>();
     for (const row of counts.results) if (row.answers) add(row.date,row.answers);
   }
   const todayDate = Date.parse(`${today}T00:00:00Z`);
@@ -91,6 +98,8 @@ export async function progress(db: D1Database, collection: ImportDocument['colle
     totalStudyDays: answers.size,
     weekStudyDays: [...answers.keys()].filter(date => date>=weekStart && date<=today).length,
     todayAnswers: answers.get(today) ?? 0,
+    todayNormalAnswers: (answers.get(today) ?? 0) - (practiceToday?.answers ?? 0),
+    todayPracticeAnswers: practiceToday?.answers ?? 0,
     tomorrow: tomorrowResult!,
   };
 }

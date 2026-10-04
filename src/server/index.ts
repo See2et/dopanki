@@ -5,6 +5,7 @@ import { preview, schedule, studyDayBoundary, type ScheduleState } from '../lib/
 import { schedulerConfig, type ImportDocument, type Deck, type StoredCard, type StudyResponse, type Note, type NoteType } from '../lib/types';
 import { summarizeDecks, studyScope, type DeckAnswers, type DeckTotals } from '../lib/decks';
 import { progress } from '../lib/progress';
+import practice from './practice';
 
 type Bindings = { DB: D1Database; MEDIA: R2Bucket; ASSETS: Fetcher; APP_PASSWORD?: string };
 type Env = ManagementEnv;
@@ -50,6 +51,7 @@ app.use('/api/*', async (c, next) => {
   await next();
 });
 app.route('/api/manage', manager);
+app.route('/api/practice', practice);
 app.get('/api/session', async c => c.json({ authenticated: await authenticated(c), passwordRequired: !!c.env.APP_PASSWORD }));
 app.post('/api/login', async c => {
   const body = await c.req.json().catch(() => null) as { password?: unknown } | null;
@@ -220,17 +222,20 @@ app.post('/api/undo', async c => {
 });
 app.get('/api/export', async c => {
   const meta = await metadata(c.env.DB);
-  const [decks,types,notes,cards,history,events,media,contentHistory] = await Promise.all([
+  const [decks,types,notes,cards,history,events,media,contentHistory,practiceSessions,practiceMembers,practiceEvents,practiceReceipts] = await Promise.all([
     c.env.DB.prepare('SELECT data FROM decks').all(), c.env.DB.prepare('SELECT data FROM note_types').all(),
     c.env.DB.prepare('SELECT data FROM notes').all(), c.env.DB.prepare('SELECT id,note_id,deck_id,ordinal,original,schedule,revision,queue,suspended_queue FROM cards').all(),
     c.env.DB.prepare('SELECT data FROM imported_reviews').all(), c.env.DB.prepare('SELECT * FROM review_events').all(),
     c.env.DB.prepare('SELECT * FROM media').all(), c.env.DB.prepare('SELECT * FROM content_history').all(),
+    c.env.DB.prepare('SELECT * FROM practice_sessions').all(), c.env.DB.prepare('SELECT * FROM practice_members').all(),
+    c.env.DB.prepare('SELECT * FROM practice_events').all(), c.env.DB.prepare('SELECT * FROM practice_receipts').all(),
   ]);
   c.header('Content-Disposition', 'attachment; filename="dopanki-backup.json"');
   return c.json({ format: 'dopanki-backup', schemaVersion: 1, exportedAt: new Date().toISOString(), metadata: meta,
     decks: decks.results.map(r => json(String(r.data))), noteTypes: types.results.map(r => json(String(r.data))),
     notes: notes.results.map(r => json(String(r.data))), cards: cards.results.map(r => ({ ...r, original: json(String(r.original)), schedule: json(String(r.schedule)) })),
-    importedReviews: history.results.map(r => json(String(r.data))), reviewEvents: events.results, media: media.results, contentHistory: contentHistory.results });
+    importedReviews: history.results.map(r => json(String(r.data))), reviewEvents: events.results, media: media.results, contentHistory: contentHistory.results,
+    practiceSessions: practiceSessions.results, practiceMembers: practiceMembers.results, practiceEvents: practiceEvents.results, practiceReceipts: practiceReceipts.results });
 });
 app.get('/media/:name', async c => {
   if (!await authenticated(c)) return c.text('Unauthorized', 401);

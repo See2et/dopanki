@@ -52,6 +52,8 @@ export interface ProgressResponse {
   totalStudyDays: number;
   weekStudyDays: number;
   todayAnswers: number;
+  todayNormalAnswers?: number;
+  todayPracticeAnswers?: number;
   tomorrow: {
     reviewedCards: number;
     movedBeyondTomorrow: number;

@@ -458,3 +458,32 @@ body:has(.fx-backdrop) .review-actions{background:none}
 .finale [data-progress-slot]{text-align:left;margin:18px 0}
 @media(max-width:760px){.daily-progress{grid-template-columns:minmax(0,1fr)}.calendar-cells{grid-template-rows:repeat(7,9px);grid-auto-columns:9px;gap:3px}.calendar-weekdays{grid-template-rows:repeat(7,9px);gap:3px;line-height:9px}.calendar-day,.calendar-pad{width:9px;height:9px}.calendar-chart{gap:6px}}
 @media(max-width:380px){.learning-calendar,.tomorrow-card{padding:14px}.calendar-stats{gap:20px}}
+
+/* Saved practice scopes share the quiet surfaces of the deck list. */
+.practice-panel { margin-top: 24px; padding: 24px; border: 1px solid var(--line, #e7ddd2); border-radius: 20px; background: #fffdf8; }
+.practice-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.practice-heading h2 { margin: 0; font-size: 1.15rem; }
+.practice-heading p, .practice-empty, .practice-help { color: #756b61; font-size: .88rem; line-height: 1.7; }
+.practice-list { list-style: none; padding: 0; margin: 16px 0 0; }
+.practice-list li { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 14px 0; border-top: 1px solid #e7ddd2; }
+.practice-list li div { min-width: 0; }
+.practice-list strong { display: block; overflow-wrap: anywhere; }
+.practice-list span { display: block; margin-top: 4px; color: #756b61; font-size: .85rem; }
+.practice-list button, .practice-heading > button { flex-shrink: 0; }
+.practice-dialog { width: min(600px, calc(100vw - 24px)); max-height: calc(100dvh - 32px); padding: 24px; border: 1px solid #e7ddd2; border-radius: 20px; color: #382f27; background: #fffdf8; box-sizing: border-box; }
+.practice-dialog::backdrop { background: #382f2766; }
+.practice-dialog fieldset { border: 1px solid #e7ddd2; border-radius: 12px; padding: 12px; margin: 20px 0; min-width: 0; }
+.practice-dialog fieldset p { font-size: .85rem; color: #756b61; }
+.practice-field { display: grid; gap: 8px; margin-top: 20px; font-weight: 600; }
+.practice-field input, .practice-field select { min-width: 0; width: 100%; box-sizing: border-box; padding: 12px; border-radius: 10px; border: 1px solid #cfc3b5; background: white; color: inherit; font: inherit; }
+.practice-deck-options { max-height: 260px; overflow: auto; }
+.practice-deck-options label { display: flex; gap: 10px; align-items: center; padding: 10px; cursor: pointer; overflow-wrap: anywhere; }
+.practice-deck-options input { flex-shrink: 0; width: 18px; height: 18px; accent-color: #b34760; }
+.practice-mode { color: #a13f56; font-weight: 700; }
+.practice-complete-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; margin-top: 20px; }
+@media (max-width: 480px) { .practice-panel, .practice-dialog { padding: 16px; } .practice-heading { align-items: flex-start; gap: 10px; } .practice-heading p { margin-bottom: 0; } }
+
+.practice-list-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.practice-delete { border: 0; background: transparent; color: var(--muted); padding: 10px 6px; font-size: .85rem; }
+.practice-delete:hover { color: #a13f56; }
+@media (max-width: 480px) { .practice-list-actions { gap: 6px; } .practice-list-actions .secondary { padding: 10px 12px; } }

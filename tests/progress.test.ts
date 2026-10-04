@@ -6,6 +6,7 @@ import type { ProgressResponse } from '../src/lib/types';
 import type { ScheduleState } from '../src/lib/scheduler';
 import { fixture } from './fixture';
 import { TestDb } from './test-db';
+import { calendarMarkup } from '../web/progress';
 
 let db: TestDb;
 function request(path = '/api/progress', body?: unknown, password?: string, headers?: Record<string,string>) {
@@ -39,7 +40,7 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(new Date('2026-10-04T18:59:00Z'));
   db = new TestDb();
-  for (const migration of ['0001_initial','0002_history_time','0003_authoring']) {
+  for (const migration of ['0001_initial','0002_history_time','0003_authoring','0004_custom_practice','0005_practice_deletion']) {
     db.sqlite.exec(readFileSync(`migrations/${migration}.sql`,'utf8'));
   }
   db.sqlite.exec(importStatements(fixture()).join(';')+';');
@@ -122,6 +123,30 @@ describe('progress calendar and tomorrow workload', () => {
     expect(result.todayAnswers).toBe(1);
     expect(result.totalStudyDays).toBe(2);
     expect(result.tomorrow.dueCards).toBe(1);
+  });
+
+  it('counts practice across the study-day rollover, excludes future and undone events, and leaves normal workload unchanged', async () => {
+    const before = await readProgress();
+    const cardsBefore = db.sqlite.prepare('SELECT schedule,revision FROM cards').all();
+    imported('normal-today','2026-10-04T02:00:00Z');
+    db.sqlite.prepare(`INSERT INTO practice_sessions(id,name,deck_ids,ordering,created_at)
+      VALUES('practice','Practice','["1"]','deck',?)`).run(new Date().toISOString());
+    const insert = db.sqlite.prepare(`INSERT INTO practice_events(id,session_id,round,card_id,rating,reviewed_at,undone)
+      VALUES(?,'practice',1,'1',3,?,?)`);
+    insert.run('before-rollover',Date.parse('2026-10-03T18:59:59.999Z'),0);
+    insert.run('at-rollover',Date.parse('2026-10-03T19:00:00Z'),0);
+    insert.run('future',Date.now()+1,0);
+    insert.run('already-undone',Date.now(),1);
+    const result = await readProgress();
+    expect(result).toMatchObject({ totalStudyDays: 2, weekStudyDays: 2,
+      todayAnswers: 2, todayNormalAnswers: 1, todayPracticeAnswers: 1 });
+    expect(result.days.find(day => day.date === '2026-10-03')?.answers).toBe(1);
+    expect(calendarMarkup(result)).toContain('通常学習 1回 · カスタム学習 1回');
+    expect(result.tomorrow).toEqual(before.tomorrow);
+    expect(db.sqlite.prepare('SELECT schedule,revision FROM cards').all()).toEqual(cardsBefore);
+    db.sqlite.exec("UPDATE practice_events SET undone=1 WHERE id IN ('before-rollover','at-rollover')");
+    expect(await readProgress()).toMatchObject({ totalStudyDays: 1, weekStudyDays: 1,
+      todayAnswers: 1, todayNormalAnswers: 1, todayPracticeAnswers: 0, tomorrow: before.tomorrow });
   });
 
   it('requires the normal session, bars management bearer credentials, and returns null before collection setup', async () => {

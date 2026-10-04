@@ -24,7 +24,7 @@ export function tomorrowMarkup(progress: ProgressResponse): string {
     <p class="tomorrow-headline">${headline}</p><p class="tomorrow-result">${result}</p>
     <dl class="tomorrow-stats"><div><dt>今日取り組んだカード</dt><dd>${number(t.reviewedCards)}<small>枚</small></dd></div><div><dt>明日までに復習予定</dt><dd>${number(t.dueCards)}<small>枚</small></dd></div></dl>
     ${t.addedForTomorrow ? `<p class="tomorrow-added">新しく学んだ${number(t.addedForTomorrow)}枚も、明日までの復習に加わりました。</p>` : ''}
-    <details class="progress-explanation"><summary>数字の見方</summary><p>今日のDopankiでの最初の回答前と、最後の回答後の予定をカードごとに比較しています。同じカードへの複数の回答は1枚として数えます。停止中のカードは含みません。</p><p>「明日まで」には今日の未完了分も含み、日次上限をかける前の枚数です。新規学習や今後の回答で予定は変わります。取り込んだAnki履歴はカレンダーに含みますが、この比較には含みません。</p></details>
+    <details class="progress-explanation"><summary>数字の見方</summary><p>今日のDopankiでの最初の回答前と、最後の回答後の予定をカードごとに比較しています。同じカードへの複数の回答は1枚として数えます。停止中のカードは含みません。</p><p>「明日まで」には今日の未完了分も含み、日次上限をかける前の枚数です。新規学習や今後の回答で予定は変わります。取り込んだAnki履歴とカスタム学習はカレンダーに含みますが、この比較には含みません。</p></details>
   </section>`;
 }
 
@@ -36,6 +36,7 @@ export function calendarMarkup(progress: ProgressResponse): string {
   return `<section class="learning-calendar" aria-labelledby="calendar-title">
     <div class="calendar-heading"><div><p class="progress-eyebrow">毎日の積み重ね</p><h2 id="calendar-title">学習カレンダー</h2></div><span class="calendar-period">直近26週間</span></div>
     <dl class="calendar-stats"><div><dt>累計の学習日</dt><dd>${number(progress.totalStudyDays)}<small>日</small></dd></div><div><dt>今週</dt><dd>${progress.weekStudyDays}<small>日</small></dd></div><div><dt>今日の回答</dt><dd>${number(progress.todayAnswers)}<small>回</small></dd></div></dl>
+    <p class="calendar-note">今日の内訳：通常学習 ${number(progress.todayNormalAnswers ?? progress.todayAnswers)}回 · カスタム学習 ${number(progress.todayPracticeAnswers ?? 0)}回</p>
     <div class="calendar-scroll"><div class="calendar-chart"><div class="calendar-weekdays" aria-hidden="true"><span>月</span><span></span><span>水</span><span></span><span>金</span><span></span><span>日</span></div><div class="calendar-cells" role="group" aria-label="日ごとの学習記録。矢印キーで日を選べます">
       ${'<span class="calendar-pad" aria-hidden="true"></span>'.repeat(padding)}${progress.days.map(day => {
         const label = `${dateLabel(day.date)}、${number(day.answers)}回答`;

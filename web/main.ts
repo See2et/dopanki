@@ -1,6 +1,8 @@
 import './style.css';
 import { openManager } from './manager';
 import { openStudyNote } from './study-note';
+import { openPracticeCreator, practiceMarkup, practiceRequestId } from './practice';
+import type { PracticeSession, PracticeStudyResponse } from '../src/lib/practice-types';
 import { escapeHtml, normalizedAnswer, renderCard, type RenderedCard } from '../src/lib/render';
 import type { DeckSummary, StudyResponse, ProgressResponse } from '../src/lib/types';
 import { frameDocument } from './card-frame';
@@ -14,7 +16,13 @@ import { MEDALS, medalArt, medalCondition, medalName, metalLabel } from './medal
 const root = document.querySelector<HTMLDivElement>('#app')!;
 let decks: DeckSummary[] = [];
 let selected: string | null = sessionStorage.getItem('dopanki_deck');
-let current: StudyResponse | null = null;
+let current: StudyResponse | PracticeStudyResponse | null = null;
+let practiceId: string | null = sessionStorage.getItem('dopanki_practice');
+let practices: PracticeSession[] = [];
+let practicesError = '';
+let roundPending: {requestId: string; revision: number; mode: 'all'|'again'} | null = null;
+const practiceState = () => current && 'practice' in current ? current.practice : null;
+function clearPractice() { practiceId = null; roundPending = null; sessionStorage.removeItem('dopanki_practice'); lastEvent = sessionStorage.getItem('dopanki_undo'); }
 let front: RenderedCard | null = null;
 let revealed = false;
 let busy = false;
@@ -106,9 +114,9 @@ function shell(content: string, mode: 'home' | 'study') {
   const chip = mode === 'home' && festival.count ? `<span class="bar-dopa" data-dopa-total="${festival.total}" title="ドパは演出用の遊びの点数です"><small>ドパ</small><b>${formatDopa(festival.total)}</b></span>` : '';
   root.innerHTML = `<header class="app-bar"><div class="app-bar-inner"><button class="brand" id="home" aria-label="デッキ一覧へ">${hamster('calm')}<span>Dopanki</span></button><div class="bar-actions">${chip}${soundButton()}<button class="bar-link" id="open-manager">教材管理</button><a href="/api/export" class="bar-link" title="教材と学習状態をJSONで保存">バックアップ</a>${passwordRequired ? '<button class="bar-link" id="logout">ログアウト</button>' : ''}</div></div></header><main class="${mode}">${content}</main>`;
   document.querySelector('#open-manager')?.addEventListener('click', () => {
-    if (saving || pending || editingNote) return;
+    if (saving || pending || roundPending || editingNote) return;
     generation++; busy = false; skippedNote = false; noteNotice = ''; answeredCard = null; undoNote = ''; resultNote = null;
-    stopEffects(); clearMedalNotices(); current = null; selected = null;
+    stopEffects(); clearMedalNotices(); current = null; selected = null; clearPractice();
     openManager(root, { imported, back: refresh });
   });
   document.querySelector('#home')?.addEventListener('click', () => void leave());
@@ -149,22 +157,23 @@ async function refreshProgress() {
 }
 function statusMarkup() { return errorMessage ? `<div class="error" role="alert">${escapeHtml(errorMessage)}</div>` : ''; }
 async function leave(farewell = false) {
-  if (saving || pending || editingNote) return;
+  if (saving || pending || roundPending || editingNote) return;
   generation++; busy = false; skippedNote = false; noteNotice = ''; answeredCard = null; undoNote = ''; resultNote = null;
   stopEffects(); clearMedalNotices();
   if (farewell) {
     restNote = `休憩タイム！ この祭りで${festival.count}枚ぶんのドパを集めました。おつかれさまです。`;
     playFanfare();
   }
-  selected = null; current = null; await refresh();
+  selected = null; current = null; clearPractice(); await refresh();
 }
 async function logout() {
-  if (saving || pending || editingNote) return;
+  if (saving || pending || roundPending || editingNote) return;
   generation++; busy = false; skippedNote = false; noteNotice = ''; answeredCard = null; undoNote = ''; resultNote = null; stopEffects(); clearMedalNotices();
   progressGeneration++; progress = null; progressError = false;
-  await api('/api/logout', {}); sessionStorage.removeItem('dopanki_undo'); lastEvent = null; login();
+  await api('/api/logout', {}); clearPractice(); selected = null; current = null; sessionStorage.removeItem('dopanki_undo'); lastEvent = null; login();
 }
 function startDeck(id: string) {
+  clearPractice(); current = null; stopEffects();
   selected = id; sessionStorage.setItem('dopanki_deck',id); restNote = '';
   try { localStorage.setItem(lastDeckKey,id); } catch { /* Only the "続きから" shortcut needs it. */ }
   void loadCard();
@@ -331,11 +340,11 @@ function overview() {
     ${imported ? `${todayPanel}<section class="home-records" aria-label="学習の記録">${progressSlot('home')}</section>
       <section class="deck-panel"><div class="deck-panel-head"><h2>デッキ</h2><label class="deck-search"><span class="sr-only">デッキを検索</span><input id="deck-search" type="search" autocomplete="off" placeholder="デッキを検索" value="${escapeHtml(deckQuery)}"><kbd aria-hidden="true">/</kbd></label></div>
         <div class="deck-tree-heading" aria-hidden="true"><span>名前</span><span class="new">新規</span><span class="learning">学習</span><span class="review">復習</span></div>
-        <ul class="deck-tree" id="deck-tree" aria-label="デッキ一覧">${deckRows()}</ul></section>`
+        <ul class="deck-tree" id="deck-tree" aria-label="デッキ一覧">${deckRows()}</ul></section><div id="practice-home">${practiceMarkup(practices,practicesError)}</div>`
     : `<section class="empty-import"><h2>Ankiの教材を引き継ぐ</h2><p>PCでAnkiパッケージを取り込むと、ここにデッキが表示されます。カード・学習履歴・FSRS設定を一緒に移行できます。</p><code>npm run import:anki -- /path/to/deck.apkg</code><button class="secondary" id="reload">取り込み後に更新</button></section>`}
     ${warnings.length ? `<details class="import-notes"><summary>移行時の確認事項 <span>${warnings.length}</span></summary><ul>${warnings.map(w => `<li>${escapeHtml(w.includes('global FSRS switch') ? '元データにFSRSの有効設定がないため、保存された記憶状態からFSRSを使用していると判断しました。パラメータは保持されています。' : w.includes('omits rollover') ? '元データに日付の切り替わり時刻がないため、午前4時として移行しました。Ankiで別の時刻を設定していた場合は、取り込み時に指定してください。' : w)}</li>`).join('')}</ul></details>` : ''}
     <p class="home-note">学習するとドパハムと「ドパ」が盛り上げます。ドパは演出用の遊びの点数で、どの評価でも同じだけ増え、記憶の強さや正答率は表しません。</p>`,'home');
-  bindDeckRows(); bindProgressSlots();
+  bindDeckRows(); bindProgressSlots(); bindPracticeHome();
   document.querySelector('[data-resume]')?.addEventListener('click', event => startDeck((event.currentTarget as HTMLElement).dataset.resume!));
   document.querySelector('#open-medals')?.addEventListener('click', openMedalDialog);
   document.querySelector<HTMLInputElement>('#deck-search')?.addEventListener('input', event => { deckQuery = (event.target as HTMLInputElement).value; renderDeckRows(); });
@@ -358,7 +367,12 @@ function spotlight(back: RenderedCard): { text: string; lang?: string } | null {
 function graphemes(text: string) {
   return typeof Intl.Segmenter === 'function' ? [...new Intl.Segmenter(undefined,{ granularity: 'grapheme' }).segment(text)].map(s => s.segment) : [...text];
 }
-const undoDisabled = () => !lastEvent || busy || skippedNote || !!pending;
+// A rewarded answer can be undone only while its matching single-step snapshots remain.
+// Unrewarded server answers (for example from another tab) have no local contribution to reverse.
+const reversibleUndo = () => !!lastEvent
+  && (!festival.counted.includes(lastEvent) || festival.last?.eventId === lastEvent)
+  && (!medals.seenEventIds.includes(lastEvent) || medals.lastReview?.eventId === lastEvent);
+const undoDisabled = () => !reversibleUndo() || busy || skippedNote || !!pending || !!roundPending;
 function syncUndo() { const button = document.querySelector<HTMLButtonElement>('#undo'); if (button) button.disabled = undoDisabled(); }
 /** Approximate rendered width in em so huge inflated numbers always fit. */
 function numberFit(text: string) {
@@ -402,7 +416,7 @@ function study() {
   if (!current || editingNote) return;
   const card = current.card;
   const deck = decks.find(d => d.id === selected);
-  const header = `<div class="study-top"><button class="back-link" id="back">← デッキ一覧</button><div class="study-deck"><span>${escapeHtml(deck ? deckPath(deck) : '')}</span><div class="counts">${deck ? countMarkup({ ...deck, counts: current.counts }) : ''}</div></div><button class="undo-button" id="undo" ${undoDisabled() ? 'disabled' : ''}>取り消す</button></div>${undoNote ? `<p class="undo-note" role="status">${escapeHtml(undoNote)}</p>` : resultNote ? `<p class="result-note is-${resultNote.verdict}" role="status">${escapeHtml(resultNote.text)}</p>` : ''}`;
+  const header = `<div class="study-top"><button class="back-link" id="back">← デッキ一覧</button><div class="study-deck"><span>${escapeHtml(practiceState()?.name ?? (deck ? deckPath(deck) : ''))}</span><div class="counts">${practiceState() ? `<span class="practice-mode">練習中 · ${practiceState()!.round}周目 · ${practiceState()!.position} / ${practiceState()!.total}枚</span>` : deck ? countMarkup({ ...deck, counts: current.counts }) : ''}</div></div><button class="undo-button" id="undo" ${undoDisabled() ? 'disabled' : ''}>取り消す</button></div>${undoNote ? `<p class="undo-note" role="status">${escapeHtml(undoNote)}</p>` : resultNote ? `<p class="result-note is-${resultNote.verdict}" role="status">${escapeHtml(resultNote.text)}</p>` : ''}`;
   if (skippedNote) {
     shell(`${header}${stageStrip('calm')}${statusMarkup()}<section class="card-panel"><p role="status">${busy ? '次のカードを準備しています…' : '教材の学習状態を確認します。次のカードを読み込んでください。'}</p>${busy ? '' : '<button class="secondary" id="retry-skipped">次のカードを読み込む</button>'}</section>`,'study');
     document.querySelector('#retry-skipped')?.addEventListener('click', () => { void loadCard(); study(); });
@@ -415,11 +429,12 @@ function study() {
     const celebrate = finale; finale = false;
     shell(`${header}${stageStrip(celebrate ? 'cheer' : 'happy')}${statusMarkup()}<section class="card-panel finale${celebrate ? ' is-celebrating' : ''}" id="finale">
       ${celebrate ? `<div class="finale-pop" aria-hidden="true">${hamster('wow')}</div>` : ''}
-      <p class="finale-title">完了!</p><h1>いまの復習は完了です</h1>
-      <dl class="finale-stats"><div><dt>今日の回答</dt><dd>${current.answeredToday}<small>回</small></dd></div><div><dt>この祭りのドパ</dt><dd>${formatDopa(festival.total)}</dd></div><div><dt>ドパを集めた回数</dt><dd>${festival.count}<small>回</small></dd></div><div><dt>次の復習</dt><dd class="finale-next">${current.nextDue ? formatTime(current.nextDue) : '次の学習日'}</dd></div></dl>
+      <p class="finale-title">完了!</p><h1>${practiceState() ? `${practiceState()!.round}周目の練習が完了しました` : 'いまの復習は完了です'}</h1>
+      <dl class="finale-stats"><div><dt>${practiceState() ? "この周の回答" : "今日の回答"}</dt><dd>${practiceState()?.position ?? current.answeredToday}<small>回</small></dd></div><div><dt>この祭りのドパ</dt><dd>${formatDopa(festival.total)}</dd></div><div><dt>ドパを集めた回数</dt><dd>${festival.count}<small>回</small></dd></div><div><dt>${practiceState() ? 'この周のもう一度' : '次の復習'}</dt><dd class="finale-next">${practiceState() ? `${practiceState()!.againCount}枚` : current.nextDue ? formatTime(current.nextDue) : '次の学習日'}</dd></div></dl>
       ${progressSlot('summary')}${medalStrip(true)}
       <p class="finale-note">どの評価でも同じだけドパが入ります。ドパは記憶の強さを表しません。</p>
-      <div class="finale-actions"><button class="primary" id="check-again">もう一度確認</button><button class="secondary" id="finale-home">デッキ一覧へ</button></div></section>`,'study');
+      ${practiceState() ? `<p class="practice-help">練習の回答は、通常の復習予定を変えません。</p><div class="practice-complete-actions"><button class="primary" data-round="all" ${busy || (roundPending && roundPending.mode !== 'all') ? 'disabled' : ''}>全範囲をもう1周</button><button class="secondary" data-round="again" ${busy || !practiceState()!.againCount || (roundPending && roundPending.mode !== 'again') ? 'disabled' : ''}>もう一度のカードだけ（${practiceState()!.againCount}枚）</button></div>` : ''}
+      <div class="finale-actions">${practiceState() ? '' : '<button class="primary" id="check-again">もう一度確認</button>'}<button class="secondary" id="finale-home">デッキ一覧へ</button></div></section>`,'study');
     document.querySelector('#finale-home')?.addEventListener('click', () => void leave());
     document.querySelector('#open-medals')?.addEventListener('click', openMedalDialog);
     if (celebrate) {
@@ -442,7 +457,7 @@ function study() {
       ${!revealed && front.typedAnswer ? `<div class="type-answer"><label for="answer-input">答えを入力 <span>任意</span></label><input id="answer-input"${inputLang ? ` lang="${escapeHtml(inputLang)}"` : ''} autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="思い出した答えを入力…" value="${escapeHtml(typed)}"></div>` : ''}
       ${revealed && front.typedAnswer && typed ? `<div class="answer-comparison ${matched ? 'match' : 'different'}"><span>入力した答え</span><strong>${escapeHtml(typed)}</strong><span>${matched ? '一致しています' : '正解と見比べて評価してください'}</span></div>` : ''}
       ${rendered.warnings.length ? `<details class="template-notes"><summary>テンプレートの確認事項</summary><p>${rendered.warnings.map(escapeHtml).join('<br>')}</p></details>` : ''}</section>
-      <div class="review-actions" id="actions">${!revealed ? '<button class="primary reveal" id="reveal">答えを表示<kbd>Space</kbd></button>' : `<div class="ratings" role="group" aria-label="評価（どれを選んでもドパは同じです）">${(['もう一度','難しい','普通','簡単'] as const).map((label,i) => `<button class="rating" data-rating="${i+1}" aria-keyshortcuts="${i+1}" ${busy || (pending && pending.rating !== i+1) ? 'disabled' : ''}><span>${label}</span><strong>${interval(card.preview[(i+1) as 1|2|3|4].due)}</strong><small aria-hidden="true">${i+1}</small></button>`).join('')}</div><p class="rating-help">${busy ? '回答を保存しています…' : pending ? '保存を確認できませんでした。同じ評価を押して再送できます。' : '思い出せた度合いを、そのまま選んでください。どれを押してもドパは同じです。'}</p>`}</div>`,'study');
+      <div class="review-actions" id="actions">${!revealed ? '<button class="primary reveal" id="reveal">答えを表示<kbd>Space</kbd></button>' : `<div class="ratings" role="group" aria-label="評価（どれを選んでもドパは同じです）">${(['もう一度','難しい','普通','簡単'] as const).map((label,i) => `<button class="rating" data-rating="${i+1}" aria-keyshortcuts="${i+1}" ${busy || (pending && pending.rating !== i+1) ? 'disabled' : ''}><span>${label}</span><strong>${practiceState() ? '' : interval(card.preview[(i+1) as 1|2|3|4].due)}</strong><small aria-hidden="true">${i+1}</small></button>`).join('')}</div><p class="rating-help">${busy ? '回答を保存しています…' : pending ? '保存を確認できませんでした。同じ評価を押して再送できます。' : '思い出せた度合いを、そのまま選んでください。どれを押してもドパは同じです。'}</p>`}</div>`,'study');
     revealing = false;
     const iframe = document.querySelector<HTMLIFrameElement>('#card-frame')!;
     iframe.addEventListener('load', () => { const height = iframe.contentDocument?.body.scrollHeight ?? 180; iframe.style.height = `${Math.max(150,height+16)}px`; });
@@ -461,6 +476,7 @@ function study() {
   document.querySelector('#back')?.addEventListener('click', () => void leave());
   document.querySelector('#undo')?.addEventListener('click', () => void undo());
   document.querySelector('#check-again')?.addEventListener('click', () => void loadCard());
+  document.querySelectorAll<HTMLButtonElement>('[data-round]').forEach(button => button.addEventListener('click', () => void nextPracticeRound(button.dataset.round as 'all'|'again')));
 }
 async function manageStudyNote(mode: 'edit' | 'suspend') {
   if (busy || saving || pending || editingNote || skippedNote || reward || answeredCard || !current?.card) return;
@@ -612,25 +628,85 @@ function audioControls(rendered: RenderedCard) {
     const audio = document.createElement('audio'); audio.controls = true; audio.preload = 'none'; audio.src = `/media/${encodeURIComponent(sound)}`; container.appendChild(audio);
   }
 }
+const practiceDeleteIds = new Map<string,string>();
+function bindPracticeHome() {
+  document.querySelectorAll<HTMLButtonElement>('[data-delete-practice]').forEach(button => button.addEventListener('click', async () => {
+    const id = button.dataset.deletePractice!;
+    const saved = practices.find(item => item.id === id);
+    if (!saved || !window.confirm(`「${saved.name}」のカスタム学習を削除しますか？\n元のデッキ・カードと練習履歴は残ります。`)) return;
+    if (!practiceDeleteIds.has(id)) practiceDeleteIds.set(id,practiceRequestId());
+    const row = button.closest('li')!;
+    row.querySelectorAll('button').forEach(control => control.disabled = true);
+    try {
+      await api(`/api/practice/${encodeURIComponent(id)}/delete`,{requestId:practiceDeleteIds.get(id)});
+      practiceDeleteIds.delete(id);
+      await refreshPractices();
+    } catch (e) {
+      practicesError = `${(e as Error).message} 削除をもう一度押すと同じ操作を再送できます。`;
+      const slot = document.querySelector('#practice-home');
+      if (slot) { slot.innerHTML = practiceMarkup(practices,practicesError); bindPracticeHome(); }
+    }
+  }));
+  document.querySelectorAll<HTMLButtonElement>('[data-practice]').forEach(button => button.addEventListener('click', () => startPractice(button.dataset.practice!)));
+  document.querySelector('#retry-practices')?.addEventListener('click', () => void refreshPractices());
+  document.querySelector('#create-practice')?.addEventListener('click', async () => {
+    const trigger = document.querySelector<HTMLButtonElement>('#create-practice');
+    const id = await openPracticeCreator(decks, async body => {
+      const result = await api<{session: PracticeSession}>('/api/practice', body); return result.session.id;
+    });
+    if (id) startPractice(id); else trigger?.focus();
+  });
+}
+async function refreshPractices() {
+  try {
+    const data = await api<{sessions: PracticeSession[]}>('/api/practice');
+    if (!data || !Array.isArray(data.sessions)) throw new Error('カスタム学習を読み込めませんでした。');
+    practices = data.sessions; practicesError = '';
+  }
+  catch (e) { practicesError = (e as Error).message; }
+  const slot = document.querySelector('#practice-home');
+  if (slot) { slot.innerHTML = practiceMarkup(practices,practicesError); bindPracticeHome(); }
+}
+function startPractice(id: string) {
+  stopEffects(); current = null; selected = null; practiceId = id; roundPending = null; lastEvent = null;
+  sessionStorage.setItem('dopanki_practice',id); restNote = ''; void loadCard();
+}
+async function nextPracticeRound(mode: 'all'|'again') {
+  const state = practiceState();
+  if (!practiceId || !state || busy || saving || pending || (roundPending && roundPending.mode !== mode)) return;
+  roundPending ??= {requestId: practiceRequestId(), revision: state.revision, mode};
+  busy = true; saving = true; errorMessage = ''; study();
+  try {
+    await api(`/api/practice/${encodeURIComponent(practiceId)}/round`,roundPending);
+    roundPending = null; saving = false; lastEvent = null; stopEffects(); await loadCard();
+  } catch (e) {
+    saving = false; busy = false;
+    if (e instanceof ApiError && e.status < 500) { roundPending = null; await loadCard(); }
+    errorMessage = roundPending ? '次の周を開始できたか確認できませんでした。同じ周回ボタンを押して再送してください。' : (e as Error).message; study();
+  }
+}
 async function refresh() {
   void refreshProgress();
   try {
     const data = await api<{ imported: boolean; decks: DeckSummary[]; warnings: string[] }>('/api/overview');
     decks = data.decks; imported = data.imported; warnings = data.warnings;
-    if (selected && decks.some(d => d.id === selected)) await loadCard(); else { selected = null; overview(); }
+    if (imported) void refreshPractices();
+    if (practiceId || (selected && decks.some(d => d.id === selected))) await loadCard(); else { selected = null; overview(); }
   } catch (e) { errorMessage = (e as Error).message; overview(); }
 }
 async function loadCard() {
-  if (!selected) return;
+  if (!selected && !practiceId) return;
   // Every queue reload can reflect a suspension, rollover or another screen's updates.
   // Keep the aggregate fresh without making it a prerequisite for learning.
   void refreshProgress();
   const request = ++generation;
   busy = true; errorMessage = '';
   try {
-    const response = await api<StudyResponse>(`/api/study/${encodeURIComponent(selected)}`);
+    const response = await api<StudyResponse | PracticeStudyResponse>(practiceId ? `/api/practice/${encodeURIComponent(practiceId)}` : `/api/study/${encodeURIComponent(selected!)}`);
     if (request !== generation) return;
-    current = response; skippedNote = false; noteNotice = ''; revealed = false; typed = ''; pending = null; busy = false;
+    current = response;
+    if ('practice' in response) lastEvent = response.practice.lastEventId;
+    skippedNote = false; noteNotice = ''; revealed = false; typed = ''; pending = null; busy = false;
     if (answeredCard && reward && !response.card) finale = true;
     answeredCard = null;
     // The burst (or a break the user has not answered yet) keeps the stage; the next card waits.
@@ -640,6 +716,11 @@ async function loadCard() {
     study();
   } catch (e) {
     if (request !== generation) return;
+    if (practiceId && e instanceof ApiError && e.status === 404) {
+      clearPractice(); selected = null; current = null; pending = null; busy = false;
+      stopEffects(); errorMessage = 'このカスタム学習は削除されたか、見つかりません。';
+      overview(); void refreshPractices(); return;
+    }
     busy = false; errorMessage = (e as Error).message;
     if (bursting) { syncUndo(); return; }
     if (current) study(); else overview();
@@ -649,12 +730,12 @@ async function answer(rating: number) {
   if (editingNote || skippedNote || busy || answeredCard || !revealed || !current?.card || (pending && pending.rating !== rating)) return;
   primeSound();
   const card = current.card;
-  pending ??= { eventId: typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Array.from(crypto.getRandomValues(new Uint32Array(4))).join('-')}`, cardId: card.id, revision: card.revision, rating };
+  pending ??= { eventId: typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Array.from(crypto.getRandomValues(new Uint32Array(4))).join('-')}`, cardId: card.id, revision: practiceState()?.revision ?? card.revision, rating };
   busy = true; saving = true; errorMessage = ''; undoNote = ''; resultNote = null; study();
   try {
-    await api('/api/review',pending);
+    await api(practiceId ? `/api/practice/${encodeURIComponent(practiceId)}/review` : '/api/review',pending);
     const eventId = pending.eventId; const rated = pending.rating as MedalRating;
-    lastEvent = eventId; sessionStorage.setItem('dopanki_undo',lastEvent);
+    lastEvent = eventId; if (!practiceId) sessionStorage.setItem('dopanki_undo',lastEvent);
     pending = null; saving = false; stopAudio();
     // Only a confirmed save reaches this point, so failures and 409 never earn festival points or
     // medals; medals.ts ignores an event it has already seen (a retried save).
@@ -666,18 +747,18 @@ async function answer(rating: number) {
     await loadCard();
   } catch (e) {
     saving = false;
-    if (e instanceof ApiError && e.status === 409) { pending = null; await loadCard(); }
+    if (e instanceof ApiError && (e.status === 409 || (practiceId && e.status === 404))) { pending = null; await loadCard(); }
     busy = false; errorMessage = (e as Error).message; study();
   }
 }
 async function undo() {
-  if (editingNote || skippedNote || !lastEvent || busy || pending) return;
-  const eventId = lastEvent;
+  if (editingNote || undoDisabled()) return;
+  const eventId = lastEvent!;
   // Silenced before the request, so a pending or failed undo is quiet too.
   stopEffects();
   busy = true; saving = true; errorMessage = ''; undoNote = ''; study();
   try {
-    await api('/api/undo',{ eventId }); lastEvent = null; sessionStorage.removeItem('dopanki_undo');
+    await api(practiceId ? `/api/practice/${encodeURIComponent(practiceId)}/undo` : '/api/undo',{ eventId }); lastEvent = null; if (!practiceId) sessionStorage.removeItem('dopanki_undo');
     const revoked = revokeReward(festival,eventId);
     if (revoked) { festival = revoked.festival; saveFestival(festival); }
     // Only a confirmed undo reaches this point; a failed undo keeps every medal.
@@ -690,7 +771,11 @@ async function undo() {
     saving = false; answeredCard = null;
     await loadCard();
   }
-  catch (e) { saving = false; busy = false; errorMessage = (e as Error).message; study(); }
+  catch (e) {
+    saving = false; busy = false;
+    if (practiceId && e instanceof ApiError && e.status === 404) { await loadCard(); return; }
+    errorMessage = (e as Error).message; study();
+  }
 }
 function login(message = '') {
   stopEffects();
