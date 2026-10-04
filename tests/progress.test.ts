@@ -40,7 +40,7 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(new Date('2026-10-04T18:59:00Z'));
   db = new TestDb();
-  for (const migration of ['0001_initial','0002_history_time','0003_authoring','0004_custom_practice','0005_practice_deletion']) {
+  for (const migration of ['0001_initial','0002_history_time','0003_authoring','0004_custom_practice','0005_practice_deletion','0006_study_options','0007_restart_new_limit']) {
     db.sqlite.exec(readFileSync(`migrations/${migration}.sql`,'utf8'));
   }
   db.sqlite.exec(importStatements(fixture()).join(';')+';');

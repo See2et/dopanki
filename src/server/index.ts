@@ -3,9 +3,9 @@ import manager, { authorizeBearer, type ManagementEnv } from './manage';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { preview, schedule, studyDayBoundary, type ScheduleState } from '../lib/scheduler';
 import { schedulerConfig, type ImportDocument, type Deck, type StoredCard, type StudyResponse, type Note, type NoteType } from '../lib/types';
-import { summarizeDecks, studyScope, type DeckAnswers, type DeckTotals } from '../lib/decks';
 import { progress } from '../lib/progress';
 import practice from './practice';
+import studyOptions, { studyContext, studyCandidates, answerAdmission } from './study-options';
 
 type Bindings = { DB: D1Database; MEDIA: R2Bucket; ASSETS: Fetcher; APP_PASSWORD?: string };
 type Env = ManagementEnv;
@@ -52,6 +52,7 @@ app.use('/api/*', async (c, next) => {
 });
 app.route('/api/manage', manager);
 app.route('/api/practice', practice);
+app.route('/api/study-options', studyOptions);
 app.get('/api/session', async c => c.json({ authenticated: await authenticated(c), passwordRequired: !!c.env.APP_PASSWORD }));
 app.post('/api/login', async c => {
   const body = await c.req.json().catch(() => null) as { password?: unknown } | null;
@@ -86,42 +87,20 @@ async function getDeck(db: D1Database, id: string) {
 export function dayBoundary(now: number, zone: string, hour: number): number {
   return studyDayBoundary(now,zone,hour);
 }
-async function answerStats(db: D1Database, boundary: number, now: number) {
-  return db.prepare(`SELECT deck_id,SUM(answered) AS answered,SUM(new) AS new,SUM(review) AS review FROM (
-    SELECT deck_id,COUNT(*) AS answered,
-      SUM(CASE WHEN json_extract(before_state,'$.state')=0 THEN 1 ELSE 0 END) AS new,
-      SUM(CASE WHEN json_extract(before_state,'$.state')=2 THEN 1 ELSE 0 END) AS review
-    FROM review_events WHERE reviewed_at>=? AND reviewed_at<=? AND undone=0 GROUP BY deck_id
-    UNION ALL
-    SELECT c.deck_id,COUNT(*) AS answered,
-      SUM(CASE WHEN json_extract(r.data,'$.type')=0 AND json_extract(r.data,'$.reviewedAt')=(
-        SELECT MIN(json_extract(first.data,'$.reviewedAt')) FROM imported_reviews first WHERE first.card_id=r.card_id
-        AND json_extract(first.data,'$.rating') BETWEEN 1 AND 4 AND json_extract(first.data,'$.type') IN (0,1,2,3)
-      ) THEN 1 ELSE 0 END) AS new,
-      SUM(CASE WHEN json_extract(r.data,'$.type')=1 THEN 1 ELSE 0 END) AS review
-    FROM imported_reviews r JOIN cards c ON c.id=r.card_id
-    WHERE json_extract(r.data,'$.reviewedAt')>=? AND json_extract(r.data,'$.reviewedAt')<=?
-      AND json_extract(r.data,'$.rating') BETWEEN 1 AND 4 AND json_extract(r.data,'$.type') IN (0,1,2,3)
-    GROUP BY c.deck_id
-  ) GROUP BY deck_id`).bind(boundary,now,boundary,now).all<DeckAnswers>();
-}
 async function restoreBuried(db: D1Database, meta: Metadata, now: number) {
   const importedAt = Date.parse(meta.source.importedAt);
   if (dayBoundary(now,meta.collection.timeZone,meta.collection.dayStart) > dayBoundary(importedAt,meta.collection.timeZone,meta.collection.dayStart)) {
     await db.prepare('UPDATE cards SET queue=CASE WHEN state=0 THEN 0 WHEN state=2 THEN 2 ELSE 1 END WHERE queue IN (-2,-3)').run();
   }
 }
-async function deckSummaries(db: D1Database, meta: Metadata, now: number) {
-  const boundary = dayBoundary(now,meta.collection.timeZone,meta.collection.dayStart);
-  const [rows,totals,answered] = await Promise.all([
-    db.prepare('SELECT data FROM decks ORDER BY name').all<{ data: string }>(),
-    db.prepare(`SELECT deck_id,COUNT(*) AS total,
-      SUM(CASE WHEN queue=0 THEN 1 ELSE 0 END) AS new,
-      SUM(CASE WHEN queue IN (1,3) AND due<=? THEN 1 ELSE 0 END) AS learning,
-      SUM(CASE WHEN queue=2 AND due<=? THEN 1 ELSE 0 END) AS review FROM cards GROUP BY deck_id`).bind(now,now).all<DeckTotals>(),
-    answerStats(db,boundary,now),
-  ]);
-  return summarizeDecks(rows.results.map(row => json<Deck>(row.data)), totals.results, answered.results);
+async function deckSummaries(db: D1Database, _meta: Metadata, now: number) {
+  const ctx=await studyContext(db,now);
+  if(!ctx)return [];
+  for(const deck of ctx.decks) {
+    const candidates=await studyCandidates(ctx,deck.id);
+    if(candidates)deck.counts=candidates.counts;
+  }
+  return ctx.decks;
 }
 app.get('/api/overview', async c => {
   const meta = await metadata(c.env.DB);
@@ -140,25 +119,14 @@ app.get('/api/study/:deck', async c => {
   if (!meta) return c.json({ error: 'デッキが見つかりません。' }, 404);
   const now = Date.now();
   await restoreBuried(c.env.DB,meta,now);
-  const decks = await deckSummaries(c.env.DB,meta,now);
-  const deck = decks.find(deck => deck.id === c.req.param('deck'));
-  if (!deck) return c.json({ error: 'デッキが見つかりません。' }, 404);
-  const counts = { counts: deck.counts, answeredToday: deck.answeredToday };
-  // One JSON-bound scope keeps queries/bindings bounded even for large deck trees.
-  const scope = JSON.stringify(studyScope(decks,deck.id));
-  const row = await c.env.DB.prepare(`SELECT cards.* FROM cards
-    JOIN json_each(?) AS eligible ON cards.deck_id=json_extract(eligible.value,'$.id') WHERE
-    ((queue IN (1,3) AND due<=?) OR (queue=2 AND due<=? AND json_extract(eligible.value,'$.review'))
-      OR (queue=0 AND json_extract(eligible.value,'$.new')))
-    ORDER BY CASE WHEN queue IN (1,3) THEN 0 WHEN queue=2 THEN 1 ELSE 2 END,
-      CASE WHEN queue=0 THEN json_extract(original,'$.due') ELSE due END, cards.id LIMIT 1`)
-    .bind(scope,now,now).first<StoredCard>();
-  if (!row) {
-    const next = await c.env.DB.prepare(`SELECT MIN(due) AS due FROM cards
-      JOIN json_each(?) AS eligible ON cards.deck_id=json_extract(eligible.value,'$.id')
-      WHERE queue IN (1,2,3) AND due>?`).bind(scope,now).first<{ due: number | null }>();
-    return c.json({ card: null, ...counts, nextDue: next?.due ?? null } satisfies StudyResponse);
-  }
+  const ctx=(await studyContext(c.env.DB,now))!;
+  const decks=ctx.decks;
+  const deck=decks.find(d=>d.id===c.req.param('deck'));
+  if(!deck)return c.json({error:'デッキが見つかりません。'},404);
+  const candidates=(await studyCandidates(ctx,deck.id))!;
+  const counts={counts:candidates.counts,answeredToday:deck.answeredToday};
+  const row=candidates.row;
+  if(!row)return c.json({card:null,...counts,nextDue:candidates.nextDue} satisfies StudyResponse);
   const n = await c.env.DB.prepare('SELECT data FROM notes WHERE id=?').bind(row.note_id).first<{ data: string }>();
   const note = json<Note>(n!.data);
   const nt = await c.env.DB.prepare('SELECT data FROM note_types WHERE id=?').bind(note.noteTypeId).first<{ data: string }>();
@@ -172,9 +140,9 @@ app.get('/api/study/:deck', async c => {
     preview: preview(state,now,schedulerConfig(actualDeck,meta.collection)) }, ...counts, nextDue: null } satisfies StudyResponse);
 });
 app.post('/api/review', async c => {
-  const body = await c.req.json().catch(() => null) as { eventId: string; cardId: string; revision: number; rating: 1 | 2 | 3 | 4 } | null;
-  if (!body || !/^[a-zA-Z0-9-]{16,80}$/.test(body.eventId) || !/^\d+$/.test(body.cardId) || !Number.isInteger(body.revision) || ![1,2,3,4].includes(body.rating)) return c.json({ error: '回答データが不正です。' }, 400);
-  const existing = await c.env.DB.prepare('SELECT card_id,rating,after_revision,undone FROM review_events WHERE id=?').bind(body.eventId).first<{ card_id: string; rating: number; after_revision: number; undone: number }>();
+  const body = await c.req.json().catch(() => null) as { eventId: string; cardId: string; revision: number; rating: 1 | 2 | 3 | 4; deckId?: string } | null;
+  if (!body || !/^[a-zA-Z0-9-]{16,80}$/.test(body.eventId) || !/^\d+$/.test(body.cardId) || !Number.isInteger(body.revision) || ![1,2,3,4].includes(body.rating) || (body.deckId!==undefined&&typeof body.deckId!=='string')) return c.json({ error: '回答データが不正です。' }, 400);
+  const existing = await c.env.DB.prepare('SELECT card_id,rating,after_revision,undone FROM review_events WHERE id=?').bind(body.eventId).first<{ card_id: string; rating: number; after_revision: number; undone: number; restart_id?:string|null; restart_available_at?:number|null }>();
   if (existing) {
     if (existing.card_id !== body.cardId || existing.rating !== body.rating || existing.after_revision !== body.revision + 1 || existing.undone) return c.json({ error: '回答IDが別の操作に使用されています。' }, 409);
     return c.json({ ok: true, eventId: body.eventId, duplicate: true });
@@ -186,17 +154,22 @@ app.post('/api/review', async c => {
   const meta = await metadata(c.env.DB);
   if (!deck || !meta) return c.json({ error: 'デッキが見つかりません。' }, 404);
   const now = Date.now();
+  const ctx=(await studyContext(c.env.DB,now))!;
+  const admission=answerAdmission(ctx,card,body.deckId);
+  if(!admission)return c.json({error:'選択したデッキのカードではありません。'},409);
   const before = json<ScheduleState>(card.schedule);
   if (card.queue !== 0 && before.due > now) return c.json({ error: 'まだ復習時刻になっていません。' }, 409);
   const after = schedule(before,body.rating,now,schedulerConfig(deck,meta.collection));
   const afterText = JSON.stringify(after);
   const queue = after.state === 2 ? 2 : 1;
   const result = await c.env.DB.batch([
-    c.env.DB.prepare('UPDATE cards SET schedule=?,state=?,due=?,queue=?,revision=revision+1,last_event_id=? WHERE id=? AND revision=? AND queue>=0')
-      .bind(afterText,after.state,after.due,queue,body.eventId,card.id,body.revision),
-    c.env.DB.prepare(`INSERT OR IGNORE INTO review_events(id,card_id,deck_id,rating,reviewed_at,before_state,after_state,after_revision)
-      SELECT ?,id,deck_id,?,?,?,schedule,revision FROM cards WHERE id=? AND revision=? AND last_event_id=?`)
-      .bind(body.eventId,body.rating,now,card.schedule,card.id,body.revision+1,body.eventId),
+    c.env.DB.prepare('UPDATE cards SET schedule=?,state=?,due=?,queue=?,revision=revision+1,last_event_id=? WHERE id=? AND revision=? AND queue>=0 AND '+admission.sql)
+      .bind(afterText,after.state,after.due,queue,body.eventId,card.id,body.revision,...admission.args),
+    c.env.DB.prepare(`INSERT OR IGNORE INTO review_events(id,card_id,deck_id,rating,reviewed_at,before_state,after_state,after_revision,restart_id,restart_backlog,restart_available_at,restart_extra_deck_id,ordinary_extra_deck_id)
+      SELECT ?,id,deck_id,?,?,?,schedule,revision,?,?,?,?,? FROM cards WHERE id=? AND revision=? AND last_event_id=?`)
+      .bind(body.eventId,body.rating,now,card.schedule,admission.restartId??admission.member?.restart_id??null,admission.member?.backlog??0,admission.member?.available_at??null,admission.extraDeckId??null,admission.ordinaryExtraDeckId??null,card.id,body.revision+1,body.eventId),
+    c.env.DB.prepare(`UPDATE study_restart_members SET answered_event_id=? WHERE card_id=? AND revision=? AND EXISTS(SELECT 1 FROM cards WHERE id=? AND last_event_id=? AND revision=?)`)
+      .bind(body.eventId,card.id,card.revision,card.id,body.eventId,card.revision+1),
   ]);
   if (!result[0].meta.changes) {
     const retry = await c.env.DB.prepare('SELECT id FROM review_events WHERE id=? AND card_id=? AND rating=? AND after_revision=? AND undone=0').bind(body.eventId,body.cardId,body.rating,body.revision+1).first();
@@ -207,7 +180,7 @@ app.post('/api/review', async c => {
 app.post('/api/undo', async c => {
   const body = await c.req.json().catch(() => null) as { eventId?: unknown } | null;
   if (!body || typeof body.eventId !== 'string') return c.json({ error: '取り消す回答が不正です。' }, 400);
-  const event = await c.env.DB.prepare('SELECT * FROM review_events WHERE id=?').bind(body.eventId).first<{ card_id: string; before_state: string; after_revision: number; undone: number }>();
+  const event = await c.env.DB.prepare('SELECT * FROM review_events WHERE id=?').bind(body.eventId).first<{ card_id: string; before_state: string; after_revision: number; undone: number; restart_id?:string|null; restart_available_at?:number|null }>();
   if (!event) return c.json({ error: '回答が見つかりません。' }, 404);
   if (event.undone) return c.json({ ok: true, duplicate: true });
   const before = json<ScheduleState>(event.before_state);
@@ -217,25 +190,33 @@ app.post('/api/undo', async c => {
       .bind(event.before_state,before.state,before.due,before.state === 0 ? 0 : before.state === 2 ? 2 : 1,before.state === 0 ? 0 : before.state === 2 ? 2 : 1,marker,event.card_id,event.after_revision,body.eventId),
     c.env.DB.prepare('UPDATE review_events SET undone=1 WHERE id=? AND EXISTS(SELECT 1 FROM cards WHERE id=? AND revision=? AND last_event_id=?)')
       .bind(body.eventId,event.card_id,event.after_revision+1,marker),
+    c.env.DB.prepare(`UPDATE study_restart_members SET answered_event_id=NULL,revision=? WHERE card_id=? AND answered_event_id=?
+      AND EXISTS(SELECT 1 FROM cards WHERE id=? AND revision=? AND last_event_id=?)`)
+      .bind(event.after_revision+1,event.card_id,body.eventId,event.card_id,event.after_revision+1,marker),
   ]);
   return results[0].meta.changes ? c.json({ ok: true, cardId: event.card_id }) : c.json({ error: 'このカードはその後に更新されているため、取り消せません。' }, 409);
 });
 app.get('/api/export', async c => {
   const meta = await metadata(c.env.DB);
-  const [decks,types,notes,cards,history,events,media,contentHistory,practiceSessions,practiceMembers,practiceEvents,practiceReceipts] = await Promise.all([
+  const [decks,types,notes,cards,history,events,media,contentHistory,practiceSessions,practiceMembers,practiceEvents,practiceReceipts,studyExtras,studyRestarts,studyMembers,studyReceipts,studyPreviews,studyGeneration] = await Promise.all([
     c.env.DB.prepare('SELECT data FROM decks').all(), c.env.DB.prepare('SELECT data FROM note_types').all(),
     c.env.DB.prepare('SELECT data FROM notes').all(), c.env.DB.prepare('SELECT id,note_id,deck_id,ordinal,original,schedule,revision,queue,suspended_queue FROM cards').all(),
     c.env.DB.prepare('SELECT data FROM imported_reviews').all(), c.env.DB.prepare('SELECT * FROM review_events').all(),
     c.env.DB.prepare('SELECT * FROM media').all(), c.env.DB.prepare('SELECT * FROM content_history').all(),
     c.env.DB.prepare('SELECT * FROM practice_sessions').all(), c.env.DB.prepare('SELECT * FROM practice_members').all(),
     c.env.DB.prepare('SELECT * FROM practice_events').all(), c.env.DB.prepare('SELECT * FROM practice_receipts').all(),
+    c.env.DB.prepare('SELECT * FROM study_extras').all(), c.env.DB.prepare('SELECT * FROM study_restarts').all(),
+    c.env.DB.prepare('SELECT * FROM study_restart_members').all(), c.env.DB.prepare('SELECT * FROM study_receipts').all(),
+    c.env.DB.prepare('SELECT * FROM study_previews').all(), c.env.DB.prepare('SELECT * FROM study_generation').all(),
   ]);
   c.header('Content-Disposition', 'attachment; filename="dopanki-backup.json"');
   return c.json({ format: 'dopanki-backup', schemaVersion: 1, exportedAt: new Date().toISOString(), metadata: meta,
     decks: decks.results.map(r => json(String(r.data))), noteTypes: types.results.map(r => json(String(r.data))),
     notes: notes.results.map(r => json(String(r.data))), cards: cards.results.map(r => ({ ...r, original: json(String(r.original)), schedule: json(String(r.schedule)) })),
     importedReviews: history.results.map(r => json(String(r.data))), reviewEvents: events.results, media: media.results, contentHistory: contentHistory.results,
-    practiceSessions: practiceSessions.results, practiceMembers: practiceMembers.results, practiceEvents: practiceEvents.results, practiceReceipts: practiceReceipts.results });
+    practiceSessions: practiceSessions.results, practiceMembers: practiceMembers.results, practiceEvents: practiceEvents.results, practiceReceipts: practiceReceipts.results,
+    studyExtras: studyExtras.results, studyRestarts: studyRestarts.results, studyRestartMembers: studyMembers.results,
+    studyReceipts: studyReceipts.results, studyPreviews: studyPreviews.results, studyGeneration: studyGeneration.results });
 });
 app.get('/media/:name', async c => {
   if (!await authenticated(c)) return c.text('Unauthorized', 401);

@@ -1,6 +1,8 @@
 import { test, expect, type Page } from '@playwright/test';
 import { mkdir } from 'node:fs/promises';
+import type { ProgressResponse } from '../../src/lib/types';
 
+const progress: ProgressResponse = {today:'2026-10-04',days:[{date:'2026-10-04',answers:0}],totalStudyDays:0,weekStudyDays:0,todayAnswers:0,tomorrow:{reviewedCards:0,movedBeyondTomorrow:0,addedForTomorrow:0,netReduction:0,dueCards:0}};
 const config={newPerDay:20,reviewPerDay:200,desiredRetention:.9,parameters:[],learningSteps:[1,10],relearningSteps:[10],maximumInterval:36500,fsrsEnabled:true};
 const deck={id:'deck-1',name:'ことばの種',configId:'config-1',config,version:1};
 const noteType={id:'type-1',name:'ことばと意味',kind:'normal',fields:['JP','裏'],fieldDefinitions:[{id:'field-0',name:'JP',required:true},{id:'field-1',name:'裏',required:false}],templates:[{id:'template-0',name:'カード1',front:'{{JP}}',back:'{{FrontSide}}<hr>{{裏}}'}],css:'.card { font-size:22px; }',version:1};
@@ -13,6 +15,7 @@ async function mock(page:Page,mutation?:(path:string,method:string,body:any)=>Pr
     if(result){await route.fulfill({status:result.status||200,json:result.body});return;}
     const defaults:Record<string,unknown>={
       '/api/session':{authenticated:true,passwordRequired:false},
+      '/api/progress':progress,'/api/practice':{sessions:[]},
       '/api/overview':{imported:true,warnings:[],decks:[{...deck,parentId:null,depth:0,label:deck.name,counts:{new:1,learning:0,review:0,total:1},ownCounts:{new:1,learning:0,review:0,total:1},answeredToday:0,ownAnsweredToday:0}]},
       '/api/manage/decks':{decks:[deck]},'/api/manage/note-types':{noteTypes:[noteType]},
       '/api/manage/notes':{notes:listedNotes,total:listedNotes.length},'/api/manage/notes/note-1':{note},

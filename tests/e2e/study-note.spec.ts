@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { mkdir } from 'node:fs/promises';
+import type { StudyOptionsResponse } from '../../src/lib/study-options-types';
 
 const config = { newPerDay: 20, desiredRetention: .9, parameters: [], learningSteps: [1,10], relearningSteps: [10], maximumInterval: 36500, fsrsEnabled: true };
 const deck = { id: 'deck', name: 'ことばの種', configId: 'config', config };
@@ -18,6 +19,12 @@ class Mock {
       const path = new URL(route.request().url()).pathname;
       const json = (data: unknown, status = 200) => route.fulfill({ json: data, status });
       if (path === '/api/session') return json({ authenticated: true, passwordRequired: false });
+      if (path === '/api/practice') return json({sessions:[]});
+      if (path === '/api/study-options/deck') {
+        const suspended = this.note.cards[0].suspended;
+        const options: StudyOptionsResponse = {deckId:'deck',studyDay:'2026-10-04',limits:{new:20,review:200},available:{new:this.empty && suspended ? 0 : suspended ? 1 : 2,review:0},extra:{new:0,review:0},restart:null};
+        return json(options);
+      }
       if (path === '/api/overview') return json({ imported: true, warnings: [], decks: [{ ...deck, parentId: null, depth: 0, label: deck.name, counts: { new: 2, learning: 0, review: 0, total: 2 }, answeredToday: 0 }] });
       if (path === '/api/progress') return json({ today: '2026-10-04', days: [{ date: '2026-10-04', answers: 0 }], totalStudyDays: 0, weekStudyDays: 0, todayAnswers: 0, tomorrow: { reviewedCards: 0, movedBeyondTomorrow: 0, addedForTomorrow: 0, netReduction: 0, dueCards: this.pendingTomorrow - (this.note.cards[0].suspended ? 2 : 0) } });
       if (path === '/api/manage/note-types') return json({ noteTypes: [type] });

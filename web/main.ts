@@ -1,6 +1,8 @@
 import './style.css';
 import { openManager } from './manager';
 import { openStudyNote } from './study-note';
+import { completionOptionsMarkup, completionTitle, openStudyOptions, restartStatusMarkup, studyOptionsPath } from './study-options';
+import type { StudyOptionsResponse } from '../src/lib/study-options-types';
 import { openPracticeCreator, practiceMarkup, practiceRequestId } from './practice';
 import type { PracticeSession, PracticeStudyResponse } from '../src/lib/practice-types';
 import { escapeHtml, normalizedAnswer, renderCard, type RenderedCard } from '../src/lib/render';
@@ -16,6 +18,7 @@ import { MEDALS, medalArt, medalCondition, medalName, metalLabel } from './medal
 const root = document.querySelector<HTMLDivElement>('#app')!;
 let decks: DeckSummary[] = [];
 let selected: string | null = sessionStorage.getItem('dopanki_deck');
+let studyOptions: StudyOptionsResponse | null = null;
 let current: StudyResponse | PracticeStudyResponse | null = null;
 let practiceId: string | null = sessionStorage.getItem('dopanki_practice');
 let practices: PracticeSession[] = [];
@@ -32,7 +35,7 @@ let skippedNote = false;
 let noteNotice = '';
 let typed = '';
 let lastEvent: string | null = sessionStorage.getItem('dopanki_undo');
-let pending: { eventId: string; cardId: string; revision: number; rating: number } | null = null;
+let pending: { eventId: string; cardId: string; revision: number; rating: number; deckId?: string } | null = null;
 let imported = false;
 let passwordRequired = false;
 let warnings: string[] = [];
@@ -173,7 +176,7 @@ async function logout() {
   await api('/api/logout', {}); clearPractice(); selected = null; current = null; sessionStorage.removeItem('dopanki_undo'); lastEvent = null; login();
 }
 function startDeck(id: string) {
-  clearPractice(); current = null; stopEffects();
+  clearPractice(); current = null; studyOptions = null; stopEffects();
   selected = id; sessionStorage.setItem('dopanki_deck',id); restNote = '';
   try { localStorage.setItem(lastDeckKey,id); } catch { /* Only the "続きから" shortcut needs it. */ }
   void loadCard();
@@ -295,7 +298,7 @@ function deckRows() {
     const due = deck.counts.new + deck.counts.learning + deck.counts.review;
     return `<li class="deck-node"><div class="deck-line ${descendants.length ? 'deck-parent' : ''} ${due ? 'has-due' : ''}">
       <div class="deck-name-container" style="--depth:${deck.depth}">${toggle}
-        <button class="deck-name" data-deck="${escapeHtml(deck.id)}" aria-label="${escapeHtml(deck.name)}を学習" title="${escapeHtml(deck.name)}"><span class="deck-label">${escapeHtml(deck.label)}</span><span class="deck-total">${deck.counts.total.toLocaleString()}枚${descendants.length ? ' · 配下を含む' : ''}</span></button>
+        <button class="deck-name" data-deck="${escapeHtml(deck.id)}" aria-label="${escapeHtml(deck.name)}を学習" title="${escapeHtml(deck.name)}"><span class="deck-label">${escapeHtml(deck.label)}</span><span class="deck-total">${deck.counts.total.toLocaleString()}枚${descendants.length ? ' · 配下を含む' : ''}</span></button><button class="deck-options-button" data-options-deck="${escapeHtml(deck.id)}" aria-label="${escapeHtml(deck.name)}の学習量を調整" title="学習量を調整">⋯</button>
       </div>
       ${(['new','learning','review'] as const).map((kind,i) => `<span class="tree-count ${kind} ${deck.counts[kind] === 0 ? 'zero-count' : ''}" aria-label="${['新規','学習','復習'][i]} ${deck.counts[kind]}枚">${deck.counts[kind]}</span>`).join('')}
     </div>${descendants.length ? `<ul class="deck-children" ${collapsed ? 'hidden' : ''}>${descendants.map(row).join('')}</ul>` : ''}</li>`;
@@ -303,7 +306,24 @@ function deckRows() {
   const roots = (children.get(null) || []).filter(d => d.counts.total > 0 && (!visible || visible.has(d.id)));
   return roots.length ? roots.map(row).join('') : `<li class="deck-empty">「${escapeHtml(deckQuery.trim())}」に一致するデッキはありません</li>`;
 }
+function showStudyOptions(id: string, kind?: 'new' | 'review') {
+  const deck = decks.find(d => d.id === id);
+  if (!deck || busy || saving || pending) return;
+  openStudyOptions(id, deck.name, api, async startStudy => {
+    if (startStudy) {
+      clearPractice(); selected = id; current = null; studyOptions = null; restNote = ''; stopEffects();
+      sessionStorage.setItem('dopanki_deck', id);
+      try { localStorage.setItem(lastDeckKey, id); } catch { /* Study works without local preferences. */ }
+      await loadCard(); return;
+    }
+    if (selected === id && !practiceId) await loadCard();
+    else {
+      const data = await api<{decks: DeckSummary[]}>('/api/overview'); decks = data.decks; overview();
+    }
+  }, kind);
+}
 function bindDeckRows() {
+  document.querySelectorAll<HTMLButtonElement>('[data-options-deck]').forEach(button => button.addEventListener('click', () => showStudyOptions(button.dataset.optionsDeck!)));
   document.querySelectorAll<HTMLButtonElement>('[data-deck]').forEach(button => button.addEventListener('click', () => startDeck(button.dataset.deck!)));
   document.querySelectorAll<HTMLButtonElement>('[data-toggle-deck]').forEach(button => button.addEventListener('click', () => {
     const id = button.dataset.toggleDeck!;
@@ -427,13 +447,13 @@ function study() {
     document.querySelector('#retry-next')?.addEventListener('click', retryNext);
   } else if (!card) {
     const celebrate = finale; finale = false;
-    shell(`${header}${stageStrip(celebrate ? 'cheer' : 'happy')}${statusMarkup()}<section class="card-panel finale${celebrate ? ' is-celebrating' : ''}" id="finale">
+    shell(`${header}${practiceState() ? '' : restartStatusMarkup(studyOptions)}${stageStrip(celebrate ? 'cheer' : 'happy')}${statusMarkup()}<section class="card-panel finale${celebrate ? ' is-celebrating' : ''}" id="finale">
       ${celebrate ? `<div class="finale-pop" aria-hidden="true">${hamster('wow')}</div>` : ''}
-      <p class="finale-title">完了!</p><h1>${practiceState() ? `${practiceState()!.round}周目の練習が完了しました` : 'いまの復習は完了です'}</h1>
+      <p class="finale-title">完了!</p><h1>${practiceState() ? `${practiceState()!.round}周目の練習が完了しました` : completionTitle(studyOptions, current.answeredToday)}</h1>
       <dl class="finale-stats"><div><dt>${practiceState() ? "この周の回答" : "今日の回答"}</dt><dd>${practiceState()?.position ?? current.answeredToday}<small>回</small></dd></div><div><dt>この祭りのドパ</dt><dd>${formatDopa(festival.total)}</dd></div><div><dt>ドパを集めた回数</dt><dd>${festival.count}<small>回</small></dd></div><div><dt>${practiceState() ? 'この周のもう一度' : '次の復習'}</dt><dd class="finale-next">${practiceState() ? `${practiceState()!.againCount}枚` : current.nextDue ? formatTime(current.nextDue) : '次の学習日'}</dd></div></dl>
       ${progressSlot('summary')}${medalStrip(true)}
       <p class="finale-note">どの評価でも同じだけドパが入ります。ドパは記憶の強さを表しません。</p>
-      ${practiceState() ? `<p class="practice-help">練習の回答は、通常の復習予定を変えません。</p><div class="practice-complete-actions"><button class="primary" data-round="all" ${busy || (roundPending && roundPending.mode !== 'all') ? 'disabled' : ''}>全範囲をもう1周</button><button class="secondary" data-round="again" ${busy || !practiceState()!.againCount || (roundPending && roundPending.mode !== 'again') ? 'disabled' : ''}>もう一度のカードだけ（${practiceState()!.againCount}枚）</button></div>` : ''}
+      ${practiceState() ? `<p class="practice-help">練習の回答は、通常の復習予定を変えません。</p><div class="practice-complete-actions"><button class="primary" data-round="all" ${busy || (roundPending && roundPending.mode !== 'all') ? 'disabled' : ''}>全範囲をもう1周</button><button class="secondary" data-round="again" ${busy || !practiceState()!.againCount || (roundPending && roundPending.mode !== 'again') ? 'disabled' : ''}>もう一度のカードだけ（${practiceState()!.againCount}枚）</button></div>` : completionOptionsMarkup(studyOptions)}
       <div class="finale-actions">${practiceState() ? '' : '<button class="primary" id="check-again">もう一度確認</button>'}<button class="secondary" id="finale-home">デッキ一覧へ</button></div></section>`,'study');
     document.querySelector('#finale-home')?.addEventListener('click', () => void leave());
     document.querySelector('#open-medals')?.addEventListener('click', openMedalDialog);
@@ -449,7 +469,7 @@ function study() {
     const inputLang = speechLang(back);
     const spot = revealed ? spotlight(back) : null;
     const matched = revealed && front.typedAnswer && typed ? normalizedAnswer(typed,front.typedAnswer.ignoreAccents) === normalizedAnswer(front.typedAnswer.expected,front.typedAnswer.ignoreAccents) : false;
-    shell(`${header}${stageStrip(revealed ? 'happy' : 'calm')}${statusMarkup()}${noteNotice ? `<p class="undo-note" role="status">${escapeHtml(noteNotice)}</p>` : ''}<div class="study-tools" aria-label="このカードの教材"><button id="edit-study-note"${busy || pending ? ' disabled' : ''}>ノートを編集</button><button id="suspend-study-note"${busy || pending ? ' disabled' : ''}>出題停止</button></div><section class="card-panel review-panel ${revealed ? 'is-answer' : 'is-question'}" id="card-panel">
+    shell(`${header}${practiceState() ? '' : restartStatusMarkup(studyOptions)}${stageStrip(revealed ? 'happy' : 'calm')}${statusMarkup()}${noteNotice ? `<p class="undo-note" role="status">${escapeHtml(noteNotice)}</p>` : ''}<div class="study-tools" aria-label="このカードの教材"><button id="edit-study-note"${busy || pending ? ' disabled' : ''}>ノートを編集</button><button id="suspend-study-note"${busy || pending ? ' disabled' : ''}>出題停止</button></div><section class="card-panel review-panel ${revealed ? 'is-answer' : 'is-question'}" id="card-panel">
       <div class="card-meta"><span class="phase-pill">${revealed ? '答え' : '問題'}</span><span class="card-state">${['新規','学習中','復習','再学習'][card.schedule.state]}</span><span class="card-deck">${escapeHtml(card.deck.name.split('::').at(-1) || '')}</span></div>
       ${spot ? `<div class="spotlight${revealing ? ' is-revealing' : ''}" id="spotlight"><span class="spotlight-word"${spot.lang ? ` lang="${escapeHtml(spot.lang)}"` : ''}>${graphemes(spot.text).map((g,i) => `<span class="g" style="--i:${i}">${escapeHtml(g)}</span>`).join('')}</span><span class="on-air" aria-hidden="true">♪ 読み上げ中</span></div>` : ''}
       ${rendered.speech.length || rendered.sounds.length ? '<div id="audio" class="audio-controls"></div>' : ''}
@@ -473,6 +493,10 @@ function study() {
     audioControls(rendered);
   }
   bindProgressSlots();
+  if (!practiceState() && selected) {
+    document.querySelectorAll('[data-study-options]').forEach(button => button.addEventListener('click', () => showStudyOptions(selected!)));
+    document.querySelectorAll<HTMLButtonElement>('[data-extra]').forEach(button => button.addEventListener('click', () => showStudyOptions(selected!, button.dataset.extra as 'new' | 'review')));
+  }
   document.querySelector('#back')?.addEventListener('click', () => void leave());
   document.querySelector('#undo')?.addEventListener('click', () => void undo());
   document.querySelector('#check-again')?.addEventListener('click', () => void loadCard());
@@ -702,9 +726,11 @@ async function loadCard() {
   const request = ++generation;
   busy = true; errorMessage = '';
   try {
+    const optionsRequest = !practiceId ? api<StudyOptionsResponse>(studyOptionsPath(selected!)).catch(() => null) : Promise.resolve(null);
     const response = await api<StudyResponse | PracticeStudyResponse>(practiceId ? `/api/practice/${encodeURIComponent(practiceId)}` : `/api/study/${encodeURIComponent(selected!)}`);
+    const options = await optionsRequest;
     if (request !== generation) return;
-    current = response;
+    studyOptions = options; current = response;
     if ('practice' in response) lastEvent = response.practice.lastEventId;
     skippedNote = false; noteNotice = ''; revealed = false; typed = ''; pending = null; busy = false;
     if (answeredCard && reward && !response.card) finale = true;
@@ -730,7 +756,7 @@ async function answer(rating: number) {
   if (editingNote || skippedNote || busy || answeredCard || !revealed || !current?.card || (pending && pending.rating !== rating)) return;
   primeSound();
   const card = current.card;
-  pending ??= { eventId: typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Array.from(crypto.getRandomValues(new Uint32Array(4))).join('-')}`, cardId: card.id, revision: practiceState()?.revision ?? card.revision, rating };
+  pending ??= { eventId: typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Array.from(crypto.getRandomValues(new Uint32Array(4))).join('-')}`, cardId: card.id, revision: practiceState()?.revision ?? card.revision, rating, ...(!practiceId ? {deckId:selected!} : {}) };
   busy = true; saving = true; errorMessage = ''; undoNote = ''; resultNote = null; study();
   try {
     await api(practiceId ? `/api/practice/${encodeURIComponent(practiceId)}/review` : '/api/review',pending);

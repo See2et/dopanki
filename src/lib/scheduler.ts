@@ -322,3 +322,23 @@ export function schedule(state: ScheduleState, rating: 1 | 2 | 3 | 4, now: numbe
   if (!ratings.includes(rating)) throw new Error('Rating must be Again=1, Hard=2, Good=3 or Easy=4');
   return outcomes(state, now, config)[rating];
 }
+
+/** The same imported-parameter adapter and local study calendar used by actual scheduling. */
+export function retrievabilities(states: ScheduleState[], now: number, config: SchedulerConfig): number[] {
+  validateConfig(config);
+  const format=formatter(config.timeZone);
+  const today=studyDay(now,config,format);
+  const kernel=new ImportedParameterKernel(config);
+  return states.map(state=>{
+    if(state.lastReview===null||state.stability<=0)return 0;
+    const elapsed=Math.max(0,today-studyDay(state.lastReview,config,format));
+    return kernel.forgetting_curve(elapsed,state.stability);
+  });
+}
+export function retrievability(state: ScheduleState, now: number, config: SchedulerConfig): number {
+  return retrievabilities([state],now,config)[0];
+}
+/** Calendar label of the collection study day, including dates before local rollover. */
+export function studyDate(now: number, timeZone: string, dayStart: number): string {
+  return new Date(studyDay(now,{ dayStart },formatter(timeZone)) * DAY).toISOString().slice(0,10);
+}
