@@ -1,5 +1,6 @@
 import './style.css';
 import { openManager } from './manager';
+import { openStudyNote } from './study-note';
 import { escapeHtml, normalizedAnswer, renderCard, type RenderedCard } from '../src/lib/render';
 import type { DeckSummary, StudyResponse } from '../src/lib/types';
 import { frameDocument } from './card-frame';
@@ -17,6 +18,9 @@ let front: RenderedCard | null = null;
 let revealed = false;
 let busy = false;
 let saving = false;
+let editingNote = false;
+let skippedNote = false;
+let noteNotice = '';
 let typed = '';
 let lastEvent: string | null = sessionStorage.getItem('dopanki_undo');
 let pending: { eventId: string; cardId: string; revision: number; rating: number } | null = null;
@@ -98,8 +102,8 @@ function shell(content: string, mode: 'home' | 'study') {
   const chip = mode === 'home' && festival.count ? `<span class="bar-dopa" data-dopa-total="${festival.total}" title="ドパは演出用の遊びの点数です"><small>ドパ</small><b>${formatDopa(festival.total)}</b></span>` : '';
   root.innerHTML = `<header class="app-bar"><div class="app-bar-inner"><button class="brand" id="home" aria-label="デッキ一覧へ">${hamster('calm')}<span>Dopanki</span></button><div class="bar-actions">${chip}${soundButton()}<button class="bar-link" id="open-manager">教材管理</button><a href="/api/export" class="bar-link" title="教材と学習状態をJSONで保存">バックアップ</a>${passwordRequired ? '<button class="bar-link" id="logout">ログアウト</button>' : ''}</div></div></header><main class="${mode}">${content}</main>`;
   document.querySelector('#open-manager')?.addEventListener('click', () => {
-    if (saving || pending) return;
-    generation++; busy = false; answeredCard = null; undoNote = ''; resultNote = null;
+    if (saving || pending || editingNote) return;
+    generation++; busy = false; skippedNote = false; noteNotice = ''; answeredCard = null; undoNote = ''; resultNote = null;
     stopEffects(); clearMedalNotices(); current = null; selected = null;
     openManager(root, { imported, back: refresh });
   });
@@ -115,8 +119,8 @@ function shell(content: string, mode: 'home' | 'study') {
 }
 function statusMarkup() { return errorMessage ? `<div class="error" role="alert">${escapeHtml(errorMessage)}</div>` : ''; }
 async function leave(farewell = false) {
-  if (saving || pending) return;
-  generation++; busy = false; answeredCard = null; undoNote = ''; resultNote = null;
+  if (saving || pending || editingNote) return;
+  generation++; busy = false; skippedNote = false; noteNotice = ''; answeredCard = null; undoNote = ''; resultNote = null;
   stopEffects(); clearMedalNotices();
   if (farewell) {
     restNote = `休憩タイム！ この祭りで${festival.count}枚ぶんのドパを集めました。おつかれさまです。`;
@@ -125,8 +129,8 @@ async function leave(farewell = false) {
   selected = null; current = null; await refresh();
 }
 async function logout() {
-  if (saving || pending) return;
-  generation++; busy = false; answeredCard = null; undoNote = ''; resultNote = null; stopEffects(); clearMedalNotices();
+  if (saving || pending || editingNote) return;
+  generation++; busy = false; skippedNote = false; noteNotice = ''; answeredCard = null; undoNote = ''; resultNote = null; stopEffects(); clearMedalNotices();
   await api('/api/logout', {}); sessionStorage.removeItem('dopanki_undo'); lastEvent = null; login();
 }
 function startDeck(id: string) {
@@ -310,7 +314,7 @@ function spotlight(back: RenderedCard): { text: string; lang?: string } | null {
 function graphemes(text: string) {
   return typeof Intl.Segmenter === 'function' ? [...new Intl.Segmenter(undefined,{ granularity: 'grapheme' }).segment(text)].map(s => s.segment) : [...text];
 }
-const undoDisabled = () => !lastEvent || busy || !!pending;
+const undoDisabled = () => !lastEvent || busy || skippedNote || !!pending;
 function syncUndo() { const button = document.querySelector<HTMLButtonElement>('#undo'); if (button) button.disabled = undoDisabled(); }
 /** Approximate rendered width in em so huge inflated numbers always fit. */
 function numberFit(text: string) {
@@ -351,11 +355,14 @@ function stageMarkup() {
     <div class="payoff-status">${status}</div></section>`;
 }
 function study() {
-  if (!current) return;
+  if (!current || editingNote) return;
   const card = current.card;
   const deck = decks.find(d => d.id === selected);
   const header = `<div class="study-top"><button class="back-link" id="back">← デッキ一覧</button><div class="study-deck"><span>${escapeHtml(deck ? deckPath(deck) : '')}</span><div class="counts">${deck ? countMarkup({ ...deck, counts: current.counts }) : ''}</div></div><button class="undo-button" id="undo" ${undoDisabled() ? 'disabled' : ''}>取り消す</button></div>${undoNote ? `<p class="undo-note" role="status">${escapeHtml(undoNote)}</p>` : resultNote ? `<p class="result-note is-${resultNote.verdict}" role="status">${escapeHtml(resultNote.text)}</p>` : ''}`;
-  if (reward || answeredCard) {
+  if (skippedNote) {
+    shell(`${header}${stageStrip('calm')}${statusMarkup()}<section class="card-panel"><p role="status">${busy ? '次のカードを準備しています…' : '教材の学習状態を確認します。次のカードを読み込んでください。'}</p>${busy ? '' : '<button class="secondary" id="retry-skipped">次のカードを読み込む</button>'}</section>`,'study');
+    document.querySelector('#retry-skipped')?.addEventListener('click', () => { void loadCard(); study(); });
+  } else if (reward || answeredCard) {
     shell(`${header}${stageStrip(breakTime ? 'cheer' : verdict === 'again' ? 'oops' : 'happy')}${statusMarkup()}${stageMarkup()}`,'study');
     document.querySelector('#continue')?.addEventListener('click', continueStudy);
     document.querySelector('#take-break')?.addEventListener('click', () => { primeSound(); void leave(true); });
@@ -383,7 +390,7 @@ function study() {
     const inputLang = speechLang(back);
     const spot = revealed ? spotlight(back) : null;
     const matched = revealed && front.typedAnswer && typed ? normalizedAnswer(typed,front.typedAnswer.ignoreAccents) === normalizedAnswer(front.typedAnswer.expected,front.typedAnswer.ignoreAccents) : false;
-    shell(`${header}${stageStrip(revealed ? 'happy' : 'calm')}${statusMarkup()}<section class="card-panel review-panel ${revealed ? 'is-answer' : 'is-question'}" id="card-panel">
+    shell(`${header}${stageStrip(revealed ? 'happy' : 'calm')}${statusMarkup()}${noteNotice ? `<p class="undo-note" role="status">${escapeHtml(noteNotice)}</p>` : ''}<div class="study-tools" aria-label="このカードの教材"><button id="edit-study-note"${busy || pending ? ' disabled' : ''}>ノートを編集</button><button id="suspend-study-note"${busy || pending ? ' disabled' : ''}>出題停止</button></div><section class="card-panel review-panel ${revealed ? 'is-answer' : 'is-question'}" id="card-panel">
       <div class="card-meta"><span class="phase-pill">${revealed ? '答え' : '問題'}</span><span class="card-state">${['新規','学習中','復習','再学習'][card.schedule.state]}</span><span class="card-deck">${escapeHtml(card.deck.name.split('::').at(-1) || '')}</span></div>
       ${spot ? `<div class="spotlight${revealing ? ' is-revealing' : ''}" id="spotlight"><span class="spotlight-word"${spot.lang ? ` lang="${escapeHtml(spot.lang)}"` : ''}>${graphemes(spot.text).map((g,i) => `<span class="g" style="--i:${i}">${escapeHtml(g)}</span>`).join('')}</span><span class="on-air" aria-hidden="true">♪ 読み上げ中</span></div>` : ''}
       ${rendered.speech.length || rendered.sounds.length ? '<div id="audio" class="audio-controls"></div>' : ''}
@@ -402,11 +409,42 @@ function study() {
       if (soundEnabled()) playAudio(renderCard(card,'back',front!.html));
     });
     document.querySelectorAll<HTMLButtonElement>('[data-rating]').forEach(button => button.addEventListener('click', () => void answer(Number(button.dataset.rating))));
+    document.querySelector('#edit-study-note')?.addEventListener('click', () => void manageStudyNote('edit'));
+    document.querySelector('#suspend-study-note')?.addEventListener('click', () => void manageStudyNote('suspend'));
     audioControls(rendered);
   }
   document.querySelector('#back')?.addEventListener('click', () => void leave());
   document.querySelector('#undo')?.addEventListener('click', () => void undo());
   document.querySelector('#check-again')?.addEventListener('click', () => void loadCard());
+}
+async function manageStudyNote(mode: 'edit' | 'suspend') {
+  if (busy || saving || pending || editingNote || skippedNote || reward || answeredCard || !current?.card) return;
+  const card = current.card;
+  editingNote = true; stopAudio(); silenceSound();
+  const result = await openStudyNote(card, mode);
+  editingNote = false;
+  if (result.kind === 'cancel' && !result.uncertain) {
+    document.querySelector<HTMLButtonElement>(mode === 'edit' ? '#edit-study-note' : '#suspend-study-note')?.focus();
+    return;
+  }
+  if (result.kind === 'saved') {
+    const managedCard = result.note.cards.find(item => item.id === card.id);
+    if (managedCard && !managedCard.suspended && managedCard.deckId === card.deck.id) {
+      // Content editing never changes the learning revision, schedule or preview intervals.
+      card.note = { ...card.note, fields: result.noteType.fields.map(name => result.note.fields[name] || ''), tags: result.note.tags, contentFormat: result.note.contentFormat };
+      card.noteType = result.noteType;
+      if (result.noteType.kind === 'normal') {
+        const ordinal = result.noteType.templates.findIndex(template => template.id === managedCard.templateId);
+        if (ordinal >= 0) card.ordinal = ordinal;
+      }
+      noteNotice = 'ノートを保存しました。';
+      study(); document.querySelector<HTMLButtonElement>('#edit-study-note')?.focus(); return;
+    }
+  }
+  // A confirmed suspension (or an unconfirmed write followed by cancellation) must never leave
+  // the old card answerable. Keep a retry screen until the server confirms the current queue.
+  skippedNote = true; current.card = null; revealed = false; typed = ''; noteNotice = '';
+  const loading = loadCard(); study(); await loading;
 }
 const center = (element: Element | null) => {
   if (!element) return null;
@@ -543,7 +581,7 @@ async function loadCard() {
   try {
     const response = await api<StudyResponse>(`/api/study/${encodeURIComponent(selected)}`);
     if (request !== generation) return;
-    current = response; revealed = false; typed = ''; pending = null; busy = false;
+    current = response; skippedNote = false; noteNotice = ''; revealed = false; typed = ''; pending = null; busy = false;
     if (answeredCard && reward && !response.card) finale = true;
     answeredCard = null;
     // The burst (or a break the user has not answered yet) keeps the stage; the next card waits.
@@ -559,7 +597,7 @@ async function loadCard() {
   }
 }
 async function answer(rating: number) {
-  if (busy || answeredCard || !revealed || !current?.card || (pending && pending.rating !== rating)) return;
+  if (editingNote || skippedNote || busy || answeredCard || !revealed || !current?.card || (pending && pending.rating !== rating)) return;
   primeSound();
   const card = current.card;
   pending ??= { eventId: typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Array.from(crypto.getRandomValues(new Uint32Array(4))).join('-')}`, cardId: card.id, revision: card.revision, rating };
@@ -584,7 +622,7 @@ async function answer(rating: number) {
   }
 }
 async function undo() {
-  if (!lastEvent || busy || pending) return;
+  if (editingNote || skippedNote || !lastEvent || busy || pending) return;
   const eventId = lastEvent;
   // Silenced before the request, so a pending or failed undo is quiet too.
   stopEffects();
@@ -617,9 +655,9 @@ function login(message = '') {
 document.addEventListener('keydown', e => {
   if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
   const target = e.target as HTMLElement;
-  const input = target.tagName === 'INPUT';
-  // The medal list is a modal dialog: it handles its own keys (Esc closes it).
-  if (document.querySelector('#medal-dialog[open]')) return;
+  const input = !!target.closest('input,textarea,select,[contenteditable=true]');
+  // Modal editors and lists own their keys; study shortcuts cannot submit through them.
+  if (editingNote || document.querySelector('dialog[open]')) return;
   if (e.key === 'Escape' && document.querySelector('#medal-toast')) { hideMedalToast(); return; }
   if (!current && e.key === '/' && !input) {
     const search = document.querySelector<HTMLInputElement>('#deck-search');
@@ -634,7 +672,8 @@ document.addEventListener('keydown', e => {
     else if (answeredCard && !busy) { e.preventDefault(); retryNext(); }
     return;
   }
-  if (busy || !current?.card) return;
+  if (busy || skippedNote || !current?.card) return;
+  if (target.closest('button,a,summary') && (e.key === 'Enter' || e.code === 'Space')) return;
   if (!revealed && (e.key === 'Enter' || (!input && e.code === 'Space'))) { e.preventDefault(); document.querySelector<HTMLButtonElement>('#reveal')?.click(); }
   else if (revealed && !input && /^[1-4]$/.test(e.key)) { e.preventDefault(); void answer(Number(e.key)); }
 });
