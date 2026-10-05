@@ -207,7 +207,8 @@ describe('hierarchical decks and selected-subtree daily limits', () => {
     expect((await studyDeck('1')).card?.id).toBe('1');
     db.sqlite.prepare('UPDATE cards SET due=? WHERE id=?').run(Date.now()+60000,'1');
     const exhausted = await studyDeck('1');
-    expect(exhausted.card).toBeNull(); expect(exhausted.nextDue).toBe(Date.now()+60000);
+    expect(exhausted.card?.id).toBe('1'); expect(exhausted.nextDue).toBe(Date.now()+60000);
+    expect(exhausted.learningPending).toBe(1); expect(exhausted.nextLearningDue).toBe(Date.now()+60000);
     // A zero new limit does not remove the independent review allowance.
     document.decks[0].config.reviewPerDay = 1;
     db.sqlite.prepare('UPDATE decks SET data=? WHERE id=?').run(JSON.stringify(document.decks[0]),'1');

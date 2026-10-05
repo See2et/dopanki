@@ -45,7 +45,11 @@ export interface DeckSummary extends Deck {
   ownCounts: Counts; ownAnsweredToday: number;
   counts: Counts; answeredToday: number;
 }
-export interface StudyResponse { card: StudyCard | null; counts: Counts; nextDue: number | null; answeredToday: number }
+export interface StudyResponse {
+  card: StudyCard | null; counts: Counts; nextDue: number | null; answeredToday: number;
+  studyDayBoundary: number; learningPending: number; nextLearningDue: number | null;
+  candidateIds: string[]; focusRemainingIds?: string[];
+}
 export interface ProgressResponse {
   today: string;
   days: { date: string; answers: number }[];

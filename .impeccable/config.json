@@ -1,0 +1,53 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "side-tab",
+        "value": "*",
+        "files": [
+          "web/style.css"
+        ],
+        "createdAt": "2026-10-05T03:29:31.399Z",
+        "reason": "Agent: web/style.css .records-chevron is a 7px disclosure-arrow icon formed by right and bottom borders, not a card accent border. It exists unchanged in HEAD."
+      },
+      {
+        "rule": "bounce-easing",
+        "value": "cubic-bezier(.3, 1.6, .5, 1)",
+        "files": [
+          "web/style.css"
+        ],
+        "createdAt": "2026-10-05T03:30:17.411Z",
+        "reason": "Agent: incumbent festival UI intentionally pops speech bubbles and answer letters and bounces a joining hamster (.crew-bubble, .is-revealing .g, .crew-member.is-new); unchanged in HEAD and described in docs/design-direction-proposal.md."
+      },
+      {
+        "rule": "bounce-easing",
+        "value": "cubic-bezier(.2, .9, .3, 1.2)",
+        "files": [
+          "web/style.css"
+        ],
+        "createdAt": "2026-10-05T03:30:17.495Z",
+        "reason": "Agent: incumbent cartoon reward stamp thuds onto the stage and a reward unit pops into view (.stamp, .fx-unit); unchanged in HEAD and part of the festival reward motion in docs/design-direction-proposal.md."
+      },
+      {
+        "rule": "bounce-easing",
+        "value": "cubic-bezier(.2, .9, .3, 1.3)",
+        "files": [
+          "web/style.css"
+        ],
+        "createdAt": "2026-10-05T03:30:17.577Z",
+        "reason": "Agent: incumbent festival reward chip and completion title deliberately pop/slam after an answer (.payoff-chip, .is-celebrating .finale-title); unchanged in HEAD and part of the festival reward presentation."
+      },
+      {
+        "rule": "bounce-easing",
+        "value": "cubic-bezier(.3, 1.5, .5, 1)",
+        "files": [
+          "web/style.css"
+        ],
+        "createdAt": "2026-10-05T03:30:17.659Z",
+        "reason": "Agent: incumbent celebratory hamsters literally jump, with matching medal and finale pop entrances (.is-celebrating .crew-leader/.crew-member, .break-crew .ham, .medal-toast, .finale-pop); unchanged in HEAD. Preserve the existing cartoon festival motion."
+      }
+    ]
+  }
+}

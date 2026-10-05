@@ -18,6 +18,6 @@ export interface PracticeSummary {
   againCount: number;
   lastEventId: string | null;
 }
-export interface PracticeStudyResponse extends StudyResponse {
+export interface PracticeStudyResponse extends Omit<StudyResponse, 'studyDayBoundary' | 'learningPending' | 'nextLearningDue' | 'candidateIds' | 'focusRemainingIds'> {
   practice: PracticeSummary;
 }

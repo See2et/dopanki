@@ -5,6 +5,19 @@ import { nextStudyDayBoundary, retrievabilities, studyDate, studyDayBoundary, ty
 import { schedulerConfig, type Deck, type DeckSummary, type ImportDocument, type StoredCard } from '../lib/types';
 import type { RestartPreview, RestartStatus, StudyOptionsResponse } from '../lib/study-options-types';
 
+export const validFocusIds = (ids: unknown): ids is string[] => Array.isArray(ids) && ids.length > 0 && ids.length <= 10 &&
+  ids.every(id => typeof id === 'string' && /^\d+$/.test(id)) && new Set(ids).size === ids.length;
+export function importedIntraday(state: ScheduleState, original: string): boolean {
+  const source=parse<{queue:number;reps:number;lastReview:number|null}>(original);
+  return source.queue===1&&state.reps===source.reps&&state.lastReview===source.lastReview;
+}
+/** Imports use Anki's queue; older local answers stored interday steps in queue 1. */
+export function intradayLearning(card: StoredCard): boolean {
+  if(card.queue!==1||(card.state!==1&&card.state!==3))return false;
+  const state=parse<ScheduleState>(card.schedule);
+  return card.last_event_id===null||state.scheduledDays===0||importedIntraday(state,card.original);
+}
+
 interface RestartRow {
   id: string; deck_id: string; scope: string; revision: number; daily_review_limit: number; daily_new_limit: number;
   backlog_per_day: number; paused: number; flattened: number; cancelled: number;
@@ -286,14 +299,23 @@ export async function optionsResponse(ctx: StudyContext, selectedId: string): Pr
     restart:restart?await restartStatus(ctx,restart):null};
 }
 
-export async function studyCandidates(ctx: StudyContext, selectedId: string): Promise<{ row:StoredCard|null; nextDue:number|null; counts:{new:number;review:number;learning:number;total:number} }|null> {
+export async function studyCandidates(ctx: StudyContext, selectedId: string, focusIds?: string[]): Promise<{
+  row:StoredCard|null; nextDue:number|null; counts:{new:number;review:number;learning:number;total:number};
+  learningPending:number; nextLearningDue:number|null; candidateIds:string[]; focusRemainingIds?:string[];
+}|null> {
   const selected=ctx.decks.find(d=>d.id===selectedId);
   if(!selected)return null;
   const eligibility=scopeOf(ctx.decks,selected).map(id=>({id}));
   if(!ctx.cards)ctx.cards=(await ctx.db.prepare(`SELECT id,note_id,deck_id,ordinal,queue,due,state,schedule,revision,last_event_id,
-    json_object('due',json_extract(original,'$.due')) AS original FROM cards WHERE queue>=0`).all<StoredCard>()).results;
+    json_object('due',json_extract(original,'$.due'),'queue',json_extract(original,'$.queue'),
+      'reps',json_extract(original,'$.reps'),'lastReview',json_extract(original,'$.lastReview')) AS original FROM cards WHERE queue>=0`).all<StoredCard>()).results;
   const byDeck=new Map(eligibility.map(e=>[e.id,e]));
-  const rows={results:ctx.cards.filter(c=>byDeck.has(c.deck_id))};
+  const nextBoundary=nextStudyDayBoundary(ctx.boundary,ctx.collection.timeZone,ctx.collection.dayStart);
+  const focus=focusIds?new Set(focusIds):null;
+  const inToday=(c:StoredCard)=>c.queue===0 || ((c.queue===1||c.queue===2||c.queue===3)&&c.due<=ctx.now) ||
+    (intradayLearning(c)&&c.due<nextBoundary);
+  const rows={results:ctx.cards.filter(c=>byDeck.has(c.deck_id)&&(!focus||(focus.has(c.id)&&inToday(c))))};
+  const pending=rows.results.filter(c=>intradayLearning(c)&&c.due<nextBoundary).sort((a,b)=>a.due-b.due||a.id.localeCompare(b.id));
   const eligible=rows.results.filter(c=>{
     if(c.queue===0)return cardAllowance(ctx,selected,c).allowed;
     if(c.due>ctx.now)return false;
@@ -321,12 +343,14 @@ export async function studyCandidates(ctx: StudyContext, selectedId: string): Pr
     return (a.queue===0?parse<{due:number}>(a.original).due:a.due)-(b.queue===0?parse<{due:number}>(b.original).due:b.due)||a.id.localeCompare(b.id);
   });
   const reservations:Reservations={base:new Map(),restart:new Map(),backlog:new Map(),grants:new Map()};
-  const counts={new:0,review:0,learning:0,total:selected.counts.total};
+  const counts={new:0,review:0,learning:pending.filter(c=>c.due>ctx.now).length,total:focus?rows.results.length:selected.counts.total};
+  const admitted:StoredCard[]=[];
   for(const c of eligible) {
-    if(c.queue===1||c.queue===3){counts.learning++;continue;}
+    if(c.queue===1||c.queue===3){counts.learning++;admitted.push(c);continue;}
     const category=c.queue===0?'new':'review';
     const allowance=cardAllowance(ctx,selected,c,reservations);
     if(!allowance.allowed)continue;
+    admitted.push(c);
     counts[category]++;
     if(allowance.grant) {
       const key=grantKey(allowance.grant,category);
@@ -341,8 +365,13 @@ export async function studyCandidates(ctx: StudyContext, selectedId: string): Pr
     }
   }
   const next=rows.results.filter(c=>c.queue!==0).map(c=>Math.max(c.due,activeMember(ctx,c)?.available_at??0)).filter(d=>d>ctx.now);
-  return {row:eligible[0]??null,nextDue:next.length?Math.min(...next):null,
-    counts};
+  const futureLearning=pending.filter(c=>c.due>ctx.now);
+  // Learn ahead only after every other eligible card in the selected scope is exhausted.
+  const row=admitted[0]??futureLearning.find(c=>c.due<=ctx.now+20*60*1000)??null;
+  const candidateIds=[...admitted,...futureLearning].slice(0,10).map(c=>c.id);
+  return {row,nextDue:next.length?Math.min(...next):null,counts,learningPending:pending.length,
+    nextLearningDue:futureLearning[0]?.due??null,candidateIds,
+    ...(focus?{focusRemainingIds:focusIds!.filter(id=>rows.results.some(c=>c.id===id))}:{})};
 }
 
 async function createPreview(ctx: StudyContext, selectedId:string, dailyReviewLimit:number, backlogPerDay:number, flatten:boolean, dailyNewLimit=0):Promise<RestartPreview|null> {

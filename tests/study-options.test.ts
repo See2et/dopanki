@@ -367,3 +367,132 @@ describe('restart backlog and truthful Flatten admission',()=>{
     expect((await get('/api/study/2')).card.id).toBe('4');
   });
 });
+
+describe('pending learning, learn ahead and focus batches',()=>{
+  function learningDoc(minutes=10) {
+    const d=doc(2,0,0);
+    d.cards[0]={...d.cards[0],type:1,queue:1,interval:0,dueAt:now+minutes*60000,left:2};
+    return d;
+  }
+  it('reports waiting intraday steps and learns ahead only after other eligible cards',async()=>{
+    seed(learningDoc());
+    let result=await get('/api/study/1');
+    expect(result).toMatchObject({studyDayBoundary:boundary,learningPending:1,nextLearningDue:now+600000});
+    expect(result.card.id).toBe('2');expect(result.candidateIds).toEqual(['2','1']);
+    expect(result.counts).toMatchObject({learning:1,review:1});
+    await post('/api/review',{eventId:'early-before-review-0001',cardId:'1',revision:0,rating:1,deckId:'1'},409);
+    await answer('2');result=await get('/api/study/1');expect(result.card.id).toBe('1');
+    const event={eventId:'early-learning-answer-0001',cardId:'1',revision:0,rating:1,deckId:'1'};
+    const answered=await post('/api/review',event);
+    expect(answered.schedule).toMatchObject({state:1,scheduledDays:0,due:now+60000});
+    expect(answered.completedForToday).toBe(false);
+    expect(answered.studyDayBoundary).toBe(boundary);
+    const duplicate=await post('/api/review',event);expect(duplicate.schedule).toEqual(answered.schedule);
+    expect(duplicate.completedForToday).toBe(false);
+    await post('/api/undo',{eventId:event.eventId});
+    expect((await get('/api/study/1')).learningPending).toBe(1);
+    expect(db.sqlite.prepare('SELECT queue FROM cards WHERE id=1').get()!.queue).toBe(1);
+  });
+  it('keeps a long intraday wait pending, while daily-cap exhaustion permits the 20-minute fallback',async()=>{
+    const d=learningDoc(21);d.decks[0].config.reviewPerDay=0;seed(d);
+    let result=await get('/api/study/1');expect(result.card).toBeNull();
+    expect(result).toMatchObject({learningPending:1,nextLearningDue:now+21*60000,nextDue:now+21*60000});
+    expect(result.counts).toMatchObject({learning:1,review:0});expect(result.candidateIds).toEqual(['1']);
+    await post('/api/review',{eventId:'outside-ahead-window-0001',cardId:'1',revision:0,rating:1,deckId:'1'},409);
+    vi.setSystemTime(now+60000);result=await get('/api/study/1');expect(result.card.id).toBe('1');
+    await post('/api/review',{eventId:'at-ahead-window-0001',cardId:'1',revision:0,rating:1,deckId:'1'});
+  });
+  it('restricts priority and answer membership to a focus batch without expanding it',async()=>{
+    seed(learningDoc());
+    const result=await get('/api/study/1?focusIds=1');
+    expect(result.card.id).toBe('1');expect(result.focusRemainingIds).toEqual(['1']);
+    expect(result.counts).toEqual({new:0,review:0,learning:1,total:1});
+    await post('/api/review',{eventId:'outside-focus-answer-0001',cardId:'2',revision:0,rating:3,deckId:'1',focusIds:['1']},409);
+    await post('/api/review',{eventId:'focused-learning-answer-0001',cardId:'1',revision:0,rating:1,deckId:'1',focusIds:['1']});
+    expect((await get('/api/study/1?focusIds=1')).focusRemainingIds).toEqual(['1']);
+    await post('/api/review',{eventId:'focused-learning-graduate-0001',cardId:'1',revision:1,rating:4,deckId:'1',focusIds:['1']});
+    expect((await get('/api/study/1?focusIds=1')).focusRemainingIds).toEqual([]);
+    expect((await get('/api/study/1?focusIds=1')).card).toBeNull();
+    expect((await get('/api/study/1')).card.id).toBe('2');
+  });
+  it('preserves imported intraday identity on undo even when the imported interval is positive',async()=>{
+    const d=learningDoc();d.cards[0].interval=21;d.decks[0].config.reviewPerDay=0;seed(d);
+    const before=db.sqlite.prepare('SELECT schedule FROM cards WHERE id=1').get()!.schedule;
+    await post('/api/review',{eventId:'imported-learning-answer-0001',cardId:'1',revision:0,rating:4,deckId:'1'});
+    await post('/api/undo',{eventId:'imported-learning-answer-0001'});
+    expect(db.sqlite.prepare('SELECT schedule,queue FROM cards WHERE id=1').get()).toMatchObject({schedule:before,queue:1});
+    expect((await get('/api/study/1')).card.id).toBe('1');expect((await get('/api/study/1')).learningPending).toBe(1);
+  });
+  it('stores generated interday steps distinctly and treats them as resolved for today',async()=>{
+    const d=doc(0,0,1);d.decks[0].config.learningSteps=[1440];seed(d);
+    const answered=await post('/api/review',{eventId:'interday-learning-answer-0001',cardId:'1',revision:0,rating:1,deckId:'1',focusIds:['1']});
+    expect(answered.schedule).toMatchObject({state:1,scheduledDays:1});
+    expect(answered.completedForToday).toBe(true);
+    expect(db.sqlite.prepare('SELECT queue FROM cards WHERE id=1').get()!.queue).toBe(3);
+    expect((await get('/api/study/1?focusIds=1')).focusRemainingIds).toEqual([]);
+    vi.setSystemTime(answered.schedule.due);expect((await get('/api/study/1?focusIds=1')).focusRemainingIds).toEqual(['1']);
+  });
+  it('reserves candidate quotas, caps batches at ten and retains temporarily quota-blocked focus members',async()=>{
+    const d=doc(20,0,3);seed(d);
+    const result=await get('/api/study/1');expect(result.candidateIds).toHaveLength(3);
+    expect(result.counts).toMatchObject({new:1,review:2});
+    d.decks[0].config.reviewPerDay=20;seed(d);
+    expect((await get('/api/study/1')).candidateIds).toHaveLength(10);
+    d.decks[0].config.reviewPerDay=0;seed(d);
+    const focused=await get('/api/study/1?focusIds=1,2');
+    expect(focused.focusRemainingIds).toEqual(['1','2']);expect(focused.candidateIds).toEqual([]);expect(focused.card).toBeNull();
+    await extra(0,1);expect((await get('/api/study/1?focusIds=1,2')).candidateIds).toEqual(['1']);
+  });
+  it('does not learn ahead ordinary reviews, interday steps or learning across the day boundary',async()=>{
+    const d=learningDoc();d.cards[0].queue=3;d.cards[0].interval=1;
+    d.cards[1].dueAt=now+5*60000;seed(d);
+    expect((await get('/api/study/1')).card).toBeNull();expect((await get('/api/study/1')).learningPending).toBe(0);
+    for(const id of ['1','2'])await post('/api/review',{eventId:`future-kind-answer-${id}`,cardId:id,revision:0,rating:3,deckId:'1'},409);
+    d.cards[0].queue=1;d.cards[0].interval=0;d.cards[0].dueAt=nextStudyDayBoundary(boundary,'Asia/Tokyo',4)+60000;seed(d);
+    vi.setSystemTime(nextStudyDayBoundary(boundary,'Asia/Tokyo',4)-60000);
+    db.sqlite.exec('UPDATE cards SET queue=-1 WHERE id=2');
+    const pending=await get('/api/study/1');expect(pending.card).toBeNull();expect(pending.learningPending).toBe(0);
+    await post('/api/review',{eventId:'across-boundary-answer-0001',cardId:'1',revision:0,rating:3,deckId:'1'},409);
+  });
+  it('reports intraday steps crossing rollover as completed for the answered day, including later duplicates',async()=>{
+    const d=doc(0,0,1);seed(d);
+    const nextBoundary=nextStudyDayBoundary(boundary,'Asia/Tokyo',4);
+    vi.setSystemTime(nextBoundary-30000);
+    const event={eventId:'crossing-rollover-answer-0001',cardId:'1',revision:0,rating:1,deckId:'1',focusIds:['1']};
+    const answered=await post('/api/review',event);
+    expect(answered.schedule).toMatchObject({state:1,scheduledDays:0,due:nextBoundary+30000});
+    expect(answered.completedForToday).toBe(true);
+    expect((await get('/api/study/1?focusIds=1')).focusRemainingIds).toEqual([]);
+    vi.setSystemTime(nextBoundary+60000);
+    const duplicate=await post('/api/review',event);
+    expect(duplicate.completedForToday).toBe(true);expect(duplicate.studyDayBoundary).toBe(boundary);
+    expect((await get('/api/study/1?focusIds=1')).focusRemainingIds).toEqual(['1']);
+  });
+  it('prunes removed or resolved focus members and keeps due interday learning',async()=>{
+    const d=doc(7,0,0);d.decks.push({...structuredClone(d.decks[0]),id:'2',name:'Outside'});
+    d.cards[0].queue=3;d.cards[0].type=1;d.cards[0].interval=1;
+    d.cards[1].queue=3;d.cards[1].type=1;d.cards[1].interval=1;d.cards[1].dueAt=nextStudyDayBoundary(boundary,'Asia/Tokyo',4);
+    d.cards[2].dueAt=now+86400000;d.cards[3].queue=-1;d.cards[4].deckId='2';seed(d);
+    db.sqlite.exec('DELETE FROM cards WHERE id=6');
+    const focused=await get('/api/study/1?focusIds=1,2,3,4,5,6,7');
+    expect(focused.focusRemainingIds).toEqual(['1','7']);expect(focused.card.id).toBe('1');
+    await post('/api/review',{eventId:'focus-cross-deck-answer-0001',cardId:'5',revision:0,rating:3,deckId:'1',focusIds:['5']},409);
+    await post('/api/review',{eventId:'focus-suspended-answer-0001',cardId:'4',revision:0,rating:3,deckId:'1',focusIds:['4']},404);
+  });
+  it.each(['','1,1','1,x','-1','1,,2',Array.from({length:11},(_,i)=>String(i+1)).join(',')])('rejects malformed focus query %j',async focus=>{
+    expect((await req('/api/study/1?focusIds='+encodeURIComponent(focus))).status).toBe(400);
+  });
+  it.each([[],['1','1'],['x'],[1],null,Array.from({length:11},(_,i)=>String(i+1))])('rejects malformed focus body %j',async focusIds=>{
+    await post('/api/review',{eventId:'bad-focus-answer-0001',cardId:'1',revision:0,rating:3,deckId:'1',focusIds},400);
+  });
+  it('rejects a competing card change after learning eligibility was computed',async()=>{
+    const d=learningDoc();d.decks[0].config.reviewPerDay=0;seed(d);
+    const batch=db.batch.bind(db);let raced=false;
+    db.batch=async statements=>{
+      if(!raced){raced=true;db.sqlite.exec('UPDATE cards SET queue=queue WHERE id=2');}
+      return batch(statements);
+    };
+    await post('/api/review',{eventId:'learning-generation-race-0001',cardId:'1',revision:0,rating:1,deckId:'1'},409);
+    expect(db.sqlite.prepare('SELECT revision FROM cards WHERE id=1').get()!.revision).toBe(0);
+  });
+});

@@ -14,6 +14,8 @@ import { finaleFx, payoffFx, playFanfare, playMedal, playPayoff, playUnit, prime
 import { friendsFor, hamColors, hamster, type Mood } from './mascot';
 import { awardMedals, loadMedals, revokeMedals, saveMedals, type MedalId, type MedalRating } from './medals';
 import { MEDALS, medalArt, medalCondition, medalName, metalLabel } from './medal-art';
+import { answerFocus, beginFocus, focusStats, readFocus, reconcileFocus, undoFocus, type FocusSession } from './focus';
+import type { ScheduleState } from '../src/lib/scheduler';
 
 const root = document.querySelector<HTMLDivElement>('#app')!;
 let decks: DeckSummary[] = [];
@@ -21,6 +23,18 @@ let selected: string | null = sessionStorage.getItem('dopanki_deck');
 let studyOptions: StudyOptionsResponse | null = null;
 let current: StudyResponse | PracticeStudyResponse | null = null;
 let practiceId: string | null = sessionStorage.getItem('dopanki_practice');
+let focusEnabled = localStorage.getItem('dopanki_focus') !== 'off';
+let focusSession: FocusSession | null = selected ? readFocus(sessionStorage.getItem(`dopanki_focus_${selected}`)) : null;
+let focusExhausted = false;
+let learningTimer = 0;
+const activeFocus = () => !practiceId && focusEnabled && focusSession?.batch.deckId === selected ? focusSession : null;
+function saveFocus() {
+  if (focusSession) sessionStorage.setItem(`dopanki_focus_${focusSession.batch.deckId}`,JSON.stringify(focusSession));
+}
+function restoreFocus(id: string) {
+  focusSession = readFocus(sessionStorage.getItem(`dopanki_focus_${id}`)); focusExhausted = false;
+}
+function stopLearningTimer() { window.clearTimeout(learningTimer); learningTimer = 0; }
 let practices: PracticeSession[] = [];
 let practicesError = '';
 let roundPending: {requestId: string; revision: number; mode: 'all'|'again'} | null = null;
@@ -35,7 +49,7 @@ let skippedNote = false;
 let noteNotice = '';
 let typed = '';
 let lastEvent: string | null = sessionStorage.getItem('dopanki_undo');
-let pending: { eventId: string; cardId: string; revision: number; rating: number; deckId?: string } | null = null;
+let pending: { eventId: string; cardId: string; revision: number; rating: number; deckId?: string; focusIds?: string[] } | null = null;
 let imported = false;
 let passwordRequired = false;
 let accessLogoutUrl: string | null = null;
@@ -84,7 +98,7 @@ function clearStage() {
   window.clearTimeout(payoffTimer); payoffTimer = 0; cancelAnimationFrame(rollFrame); stopFireworks();
   reward = null; bursting = false; breakTime = false; finale = false;
 }
-function stopEffects() { stopAudio(); silenceSound(); clearStage(); }
+function stopEffects() { stopAudio(); silenceSound(); clearStage(); stopLearningTimer(); }
 function announce(message: string) {
   const live = document.querySelector('#festival-live');
   if (live) live.textContent = message;
@@ -180,6 +194,7 @@ async function logout() {
 function startDeck(id: string) {
   clearPractice(); current = null; studyOptions = null; stopEffects();
   selected = id; sessionStorage.setItem('dopanki_deck',id); restNote = '';
+  restoreFocus(id);
   try { localStorage.setItem(lastDeckKey,id); } catch { /* Only the "続きから" shortcut needs it. */ }
   void loadCard();
 }
@@ -314,6 +329,7 @@ function showStudyOptions(id: string, kind?: 'new' | 'review') {
   openStudyOptions(id, deck.name, api, async startStudy => {
     if (startStudy) {
       clearPractice(); selected = id; current = null; studyOptions = null; restNote = ''; stopEffects();
+      restoreFocus(id);
       sessionStorage.setItem('dopanki_deck', id);
       try { localStorage.setItem(lastDeckKey, id); } catch { /* Study works without local preferences. */ }
       await loadCard(); return;
@@ -434,11 +450,36 @@ function stageMarkup() {
     ${reward ? `<p class="payoff-amount" style="--fit:${numberFit(amount).toFixed(2)}"><span class="payoff-plus" aria-hidden="true">+</span><span class="payoff-value" data-dopa-amount="${reward.amount}">${amount}</span><span class="payoff-unit">ドパ</span></p>` : '<p class="payoff-saved">回答を保存しました</p>'}
     <div class="payoff-status">${status}</div></section>`;
 }
+function focusMarkup() {
+  if (practiceId) return '';
+  const s = activeFocus();
+  const b = s?.batch;
+  const finished = b ? b.ids.length - b.pending.length : 0;
+  return `<section class="focus-toolbar" aria-label="学習モード"><div>${b ? `<span class="focus-eyebrow">集中モード · ${b.number}組目</span><div class="focus-progress"><strong>${finished}<small> / ${b.ids.length}枚</small></strong><div class="focus-dots" aria-hidden="true">${b.ids.map(id => `<i class="${b.pending.includes(id) ? 'is-pending' : b.excluded.includes(id) ? 'is-excluded' : 'is-done'}"></i>`).join('')}</div></div>` : `<strong>${focusEnabled ? '10枚ずつ集中して学習' : '連続モード'}</strong><p>${focusEnabled ? '覚え直すカードも、同じ組で繰り返します。' : '出題できるカードを続けて学習します。'}</p>`}</div><button class="focus-toggle" id="toggle-focus" aria-pressed="${focusEnabled}" ${busy || pending || editingNote || reward || answeredCard ? 'disabled' : ''}>${focusEnabled ? '連続モードへ' : '10枚ずつ学ぶ'}</button></section>`;
+}
+function focusResultMarkup() {
+  const b = activeFocus()!.batch;
+  const stats = focusStats(b);
+  return `<section class="card-panel focus-result" aria-label="この組のリザルト"><p class="focus-eyebrow">${b.number}組目のリザルト</p><div class="focus-result-mascot" aria-hidden="true">${hamster('cheer')}</div><h1>${b.ids.length}枚の組を終えました</h1><p class="focus-result-lead">${stats.finished ? '今日の学習ステップ、おつかれさまでした。' : 'この組のカードは、ほかの画面で更新されました。'}</p><dl class="focus-result-stats"><div><dt>当日分を完了</dt><dd>${stats.finished}<small>枚</small></dd></div><div><dt>最初に思い出せた</dt><dd>${stats.recalledFirst}<small>枚</small></dd></div><div><dt>覚え直した</dt><dd>${stats.relearned}<small>枚</small></dd></div></dl><p class="focus-result-note">回答 ${stats.answers}回${b.excluded.length ? ` · 対象外・ほかの画面で更新 ${b.excluded.length}枚` : ''}。次の復習はカードごとの予定に沿って出題します。</p><div class="focus-result-actions">${focusExhausted ? '<p class="focus-result-lead">いま取り組める次の組はありません。</p><button class="primary" id="check-next-batch">次の組を確認</button>' : '<button class="primary" id="next-focus">次の10枚へ<span aria-hidden="true"> →</span></button>'}<button class="secondary" id="focus-rest">休憩する</button></div>${focusExhausted ? completionOptionsMarkup(studyOptions) : ''}</section>`;
+}
+function scheduleLearningRefresh() {
+  stopLearningTimer();
+  if (practiceId || !selected || current?.card || !current || !('nextLearningDue' in current) || !current.nextLearningDue || activeFocus()?.batch.pending.length === 0) return;
+  const deckId = selected;
+  // When the final pending step enters the learn-ahead window it becomes answerable.
+  const delay = Math.max(1000,Math.min(30_000,current.nextLearningDue - 20 * 60_000 - Date.now() + 100));
+  learningTimer = window.setTimeout(() => {
+    if (selected !== deckId || practiceId || editingNote) return;
+    if (busy || saving || pending || reward || answeredCard) { scheduleLearningRefresh(); return; }
+    void loadCard();
+  },delay);
+}
 function study() {
   if (!current || editingNote) return;
+  stopLearningTimer();
   const card = current.card;
   const deck = decks.find(d => d.id === selected);
-  const header = `<div class="study-top"><button class="back-link" id="back">← デッキ一覧</button><div class="study-deck"><span>${escapeHtml(practiceState()?.name ?? (deck ? deckPath(deck) : ''))}</span><div class="counts">${practiceState() ? `<span class="practice-mode">練習中 · ${practiceState()!.round}周目 · ${practiceState()!.position} / ${practiceState()!.total}枚</span>` : deck ? countMarkup({ ...deck, counts: current.counts }) : ''}</div></div><button class="undo-button" id="undo" ${undoDisabled() ? 'disabled' : ''}>取り消す</button></div>${undoNote ? `<p class="undo-note" role="status">${escapeHtml(undoNote)}</p>` : resultNote ? `<p class="result-note is-${resultNote.verdict}" role="status">${escapeHtml(resultNote.text)}</p>` : ''}`;
+  const header = `<div class="study-top"><button class="back-link" id="back">← デッキ一覧</button><div class="study-deck"><span>${escapeHtml(practiceState()?.name ?? (deck ? deckPath(deck) : ''))}</span><div class="counts">${practiceState() ? `<span class="practice-mode">練習中 · ${practiceState()!.round}周目 · ${practiceState()!.position} / ${practiceState()!.total}枚</span>` : deck ? countMarkup({ ...deck, counts: current.counts }) : ''}</div></div><button class="undo-button" id="undo" ${undoDisabled() ? 'disabled' : ''}>取り消す</button></div>${focusMarkup()}${undoNote ? `<p class="undo-note" role="status">${escapeHtml(undoNote)}</p>` : resultNote ? `<p class="result-note is-${resultNote.verdict}" role="status">${escapeHtml(resultNote.text)}</p>` : ''}`;
   if (skippedNote) {
     shell(`${header}${stageStrip('calm')}${statusMarkup()}<section class="card-panel"><p role="status">${busy ? '次のカードを準備しています…' : '教材の学習状態を確認します。次のカードを読み込んでください。'}</p>${busy ? '' : '<button class="secondary" id="retry-skipped">次のカードを読み込む</button>'}</section>`,'study');
     document.querySelector('#retry-skipped')?.addEventListener('click', () => { void loadCard(); study(); });
@@ -447,6 +488,18 @@ function study() {
     document.querySelector('#continue')?.addEventListener('click', continueStudy);
     document.querySelector('#take-break')?.addEventListener('click', () => { primeSound(); void leave(true); });
     document.querySelector('#retry-next')?.addEventListener('click', retryNext);
+  } else if (activeFocus()?.batch.pending.length === 0) {
+    shell(`${header}${stageStrip('happy')}${statusMarkup()}${focusResultMarkup()}`,'study');
+    document.querySelector('#next-focus')?.addEventListener('click', () => void loadCard(true));
+    document.querySelector('#check-next-batch')?.addEventListener('click', () => void loadCard(true));
+    document.querySelector('#focus-rest')?.addEventListener('click', () => void leave());
+  } else if (!card && !practiceState() && 'learningPending' in current && current.learningPending > 0) {
+    shell(`${header}${stageStrip('calm')}${statusMarkup()}<section class="card-panel learning-wait" aria-label="再学習待ち"><p class="focus-eyebrow">まだ学習の途中です</p><div class="waiting-mascot" aria-hidden="true">${hamster('calm')}</div><h1>覚え直しの時間を待っています</h1><p class="waiting-count">あと <strong>${current.learningPending}</strong> 枚</p><p class="waiting-time">次の学習予定は ${current.nextLearningDue ? formatTime(current.nextLearningDue) : '確認中'}。出題できる時刻になったら自動で再開します。</p><div class="focus-result-actions"><button class="primary" id="check-again">もう一度確認</button><button class="secondary" id="waiting-rest">いったん休憩する</button></div><p class="focus-result-note">この画面を閉じても、カードの復習予定は保存されています。</p></section>`,'study');
+    document.querySelector('#waiting-rest')?.addEventListener('click', () => void leave());
+    scheduleLearningRefresh();
+  } else if (!card && activeFocus()) {
+    shell(`${header}${stageStrip('calm')}${statusMarkup()}<section class="card-panel learning-wait"><p class="focus-eyebrow">この組はまだ途中です</p><h1>いま出題できるカードがありません</h1><p class="waiting-time">残り${activeFocus()!.batch.pending.length}枚は出題上限や再開ペースに沿って出題します。学習量を調整するか、いったん休憩できます。</p><div class="focus-result-actions"><button class="primary" data-study-options>今日の学習量を調整</button><button class="secondary" id="waiting-rest">いったん休憩する</button></div></section>`,'study');
+    document.querySelector('#waiting-rest')?.addEventListener('click', () => void leave());
   } else if (!card) {
     const celebrate = finale; finale = false;
     shell(`${header}${practiceState() ? '' : restartStatusMarkup(studyOptions)}${stageStrip(celebrate ? 'cheer' : 'happy')}${statusMarkup()}<section class="card-panel finale${celebrate ? ' is-celebrating' : ''}" id="finale">
@@ -501,6 +554,13 @@ function study() {
   }
   document.querySelector('#back')?.addEventListener('click', () => void leave());
   document.querySelector('#undo')?.addEventListener('click', () => void undo());
+  document.querySelector('#toggle-focus')?.addEventListener('click', () => {
+    if (busy || saving || pending || editingNote || reward || answeredCard) return;
+    focusEnabled = !focusEnabled;
+    localStorage.setItem('dopanki_focus',focusEnabled ? 'on' : 'off');
+    if (focusEnabled && selected) restoreFocus(selected);
+    void loadCard();
+  });
   document.querySelector('#check-again')?.addEventListener('click', () => void loadCard());
   document.querySelectorAll<HTMLButtonElement>('[data-round]').forEach(button => button.addEventListener('click', () => void nextPracticeRound(button.dataset.round as 'all'|'again')));
 }
@@ -609,7 +669,7 @@ function celebrate(eventId: string, outcome: Verdict) {
   if (!granted) return;
   festival = granted.festival; saveFestival(festival);
   reward = granted.record; verdict = outcome;
-  breakTime = festival.count % breakEvery === 0;
+  breakTime = !activeFocus() && festival.count % breakEvery === 0;
   bursting = !reducedMotion();
   const crossed = unitIndex(festival.total) > unitIndex(reward.prevTotal) ? unitLabel(unitIndex(festival.total)) : null;
   const tier = feverTier(festival.count);
@@ -720,8 +780,10 @@ async function refresh() {
     if (practiceId || (selected && decks.some(d => d.id === selected))) await loadCard(); else { selected = null; overview(); }
   } catch (e) { errorMessage = (e as Error).message; overview(); }
 }
-async function loadCard() {
+async function loadCard(nextBatch = false) {
   if (!selected && !practiceId) return;
+  if (nextBatch && busy) return;
+  stopLearningTimer();
   // Every queue reload can reflect a suspension, rollover or another screen's updates.
   // Keep the aggregate fresh without making it a prerequisite for learning.
   void refreshProgress();
@@ -729,13 +791,36 @@ async function loadCard() {
   busy = true; errorMessage = '';
   try {
     const optionsRequest = !practiceId ? api<StudyOptionsResponse>(studyOptionsPath(selected!)).catch(() => null) : Promise.resolve(null);
-    const response = await api<StudyResponse | PracticeStudyResponse>(practiceId ? `/api/practice/${encodeURIComponent(practiceId)}` : `/api/study/${encodeURIComponent(selected!)}`);
+    let batch = activeFocus();
+    const studyPath = () => `/api/study/${encodeURIComponent(selected!)}`;
+    const restrictedPath = (s: FocusSession) => `${studyPath()}?focusIds=${encodeURIComponent((s.batch.pending.length ? s.batch.pending : s.batch.ids).join(','))}`;
+    let response = await api<StudyResponse | PracticeStudyResponse>(practiceId ? `/api/practice/${encodeURIComponent(practiceId)}` : batch && !nextBatch ? restrictedPath(batch) : studyPath());
     const options = await optionsRequest;
     if (request !== generation) return;
+    if (!practiceId && 'candidateIds' in response && focusEnabled) {
+      if (batch && batch.batch.day !== response.studyDayBoundary) {
+        sessionStorage.removeItem(`dopanki_focus_${batch.batch.deckId}`);
+        focusSession = null; batch = null;
+        response = await api<StudyResponse>(studyPath());
+        if (request !== generation) return;
+      }
+      if ('candidateIds' in response && (!batch || nextBatch)) {
+        const ids = response.candidateIds;
+        if (ids.length) {
+          focusSession = beginFocus(selected!,response.studyDayBoundary,ids,batch?.batch ?? null);
+          focusExhausted = false; saveFocus();
+          response = await api<StudyResponse>(restrictedPath(focusSession));
+          if (request !== generation) return;
+        } else if (nextBatch) focusExhausted = true;
+      }
+      if (activeFocus() && 'focusRemainingIds' in response && response.focusRemainingIds) {
+        focusSession = reconcileFocus(activeFocus()!,response.focusRemainingIds); saveFocus();
+      }
+    }
     studyOptions = options; current = response;
     if ('practice' in response) lastEvent = response.practice.lastEventId;
     skippedNote = false; noteNotice = ''; revealed = false; typed = ''; pending = null; busy = false;
-    if (answeredCard && reward && !response.card) finale = true;
+    if (answeredCard && reward && !response.card && !activeFocus() && !('learningPending' in response && response.learningPending > 0)) finale = true;
     answeredCard = null;
     // The burst (or a break the user has not answered yet) keeps the stage; the next card waits.
     if (reward && (bursting || (breakTime && response.card))) { syncUndo(); return; }
@@ -758,11 +843,16 @@ async function answer(rating: number) {
   if (editingNote || skippedNote || busy || answeredCard || !revealed || !current?.card || (pending && pending.rating !== rating)) return;
   primeSound();
   const card = current.card;
-  pending ??= { eventId: typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Array.from(crypto.getRandomValues(new Uint32Array(4))).join('-')}`, cardId: card.id, revision: practiceState()?.revision ?? card.revision, rating, ...(!practiceId ? {deckId:selected!} : {}) };
+  pending ??= { eventId: typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Array.from(crypto.getRandomValues(new Uint32Array(4))).join('-')}`, cardId: card.id, revision: practiceState()?.revision ?? card.revision, rating, ...(!practiceId ? {deckId:selected!,...(activeFocus() ? {focusIds:[...activeFocus()!.batch.pending]} : {})} : {}) };
   busy = true; saving = true; errorMessage = ''; undoNote = ''; resultNote = null; study();
   try {
-    await api(practiceId ? `/api/practice/${encodeURIComponent(practiceId)}/review` : '/api/review',pending);
+    const saved = await api<{schedule?: ScheduleState; completedForToday?: boolean}>(practiceId ? `/api/practice/${encodeURIComponent(practiceId)}/review` : '/api/review',pending);
     const eventId = pending.eventId; const rated = pending.rating as MedalRating;
+    if (activeFocus()) {
+      const schedule = saved.schedule ?? card.preview[rated];
+      focusSession = answerFocus(activeFocus()!,{eventId,cardId:card.id,rating:rated,resolved:saved.completedForToday ?? (schedule.state === 2 || schedule.scheduledDays > 0)});
+      saveFocus();
+    }
     lastEvent = eventId; if (!practiceId) sessionStorage.setItem('dopanki_undo',lastEvent);
     pending = null; saving = false; stopAudio();
     // Only a confirmed save reaches this point, so failures and 409 never earn festival points or
@@ -787,6 +877,7 @@ async function undo() {
   busy = true; saving = true; errorMessage = ''; undoNote = ''; study();
   try {
     await api(practiceId ? `/api/practice/${encodeURIComponent(practiceId)}/undo` : '/api/undo',{ eventId }); lastEvent = null; if (!practiceId) sessionStorage.removeItem('dopanki_undo');
+    if (!practiceId && focusSession) { focusSession = undoFocus(focusSession,eventId); focusExhausted = false; saveFocus(); }
     const revoked = revokeReward(festival,eventId);
     if (revoked) { festival = revoked.festival; saveFestival(festival); }
     // Only a confirmed undo reaches this point; a failed undo keeps every medal.
@@ -843,6 +934,10 @@ document.addEventListener('keydown', e => {
   if (target.closest('button,a,summary') && (e.key === 'Enter' || e.code === 'Space')) return;
   if (!revealed && (e.key === 'Enter' || (!input && e.code === 'Space'))) { e.preventDefault(); document.querySelector<HTMLButtonElement>('#reveal')?.click(); }
   else if (revealed && !input && /^[1-4]$/.test(e.key)) { e.preventDefault(); void answer(Number(e.key)); }
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && selected && !practiceId && current && !current.card &&
+    'learningPending' in current && current.learningPending > 0 && !busy && !saving && !pending && !editingNote && !reward && !answeredCard && activeFocus()?.batch.pending.length !== 0) void loadCard();
 });
 root.innerHTML = '<div class="loading" role="status">Dopankiを読み込んでいます…</div>';
 try { const session = await api<{ authenticated: boolean; passwordRequired: boolean; logoutUrl?: string }>('/api/session'); passwordRequired = session.passwordRequired; accessLogoutUrl = session.logoutUrl === '/cdn-cgi/access/logout' ? session.logoutUrl : null; if (session.authenticated) await refresh(); else login(); }
