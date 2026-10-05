@@ -5,9 +5,10 @@ import { completionOptionsMarkup, completionTitle, openStudyOptions, restartStat
 import type { StudyOptionsResponse } from '../src/lib/study-options-types';
 import { openPracticeCreator, practiceMarkup, practiceRequestId } from './practice';
 import type { PracticeSession, PracticeStudyResponse } from '../src/lib/practice-types';
-import { escapeHtml, normalizedAnswer, renderCard, type RenderedCard } from '../src/lib/render';
+import { escapeHtml, renderCard, type RenderedCard } from '../src/lib/render';
 import type { DeckSummary, StudyResponse, ProgressResponse } from '../src/lib/types';
 import { frameDocument } from './card-frame';
+import { answerComparison } from './answer-diff';
 import { bindProgress, progressMarkup } from './progress';
 import { feverTier, formatDopa, grantReward, loadFestival, revokeReward, saveFestival, unitIndex, unitLabel, type FestivalRecord } from './festival';
 import { finaleFx, payoffFx, playFanfare, playMedal, playPayoff, playUnit, primeSound, setSoundEnabled, silenceSound, soundEnabled, stopFireworks, sweepFx } from './fx';
@@ -392,14 +393,14 @@ function overview() {
 /* ---------- Study ---------- */
 const langPattern = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*$/;
 const speechLang = (r: RenderedCard) => r.speech.map(s => s.lang).find(lang => langPattern.test(lang));
-/** Words on Stage: a short, escaped headline taken only from what the back side reveals or speaks. */
+/** Words on Stage: a short, escaped headline taken only from what the back side speaks.
+ * Typed-answer cards skip it: their answer already shows on the card, compared with the input. */
 function spotlight(back: RenderedCard): { text: string; lang?: string } | null {
   const clean = (s: string) => s.replace(/\s+/g,' ').trim();
-  const expected = clean(back.typedAnswer?.expected ?? '');
   const spoken = back.speech.map(s => ({ text: clean(s.text), lang: s.lang })).filter(s => s.text);
-  const text = expected || spoken.map(s => s.text).join(' / ');
+  const text = spoken.map(s => s.text).join(' / ');
   if (!text || [...text].length > 48) return null;
-  const lang = expected ? spoken.find(s => normalizedAnswer(s.text) === normalizedAnswer(expected))?.lang : spoken.length === 1 ? spoken[0].lang : undefined;
+  const lang = spoken.length === 1 ? spoken[0].lang : undefined;
   return { text, lang: lang && langPattern.test(lang) ? lang : undefined };
 }
 function graphemes(text: string) {
@@ -522,21 +523,23 @@ function study() {
     const back = renderCard(card,'back',front.html);
     const rendered = revealed ? back : front;
     const inputLang = speechLang(back);
-    const spot = revealed ? spotlight(back) : null;
-    const matched = revealed && front.typedAnswer && typed ? normalizedAnswer(typed,front.typedAnswer.ignoreAccents) === normalizedAnswer(front.typedAnswer.expected,front.typedAnswer.ignoreAccents) : false;
+    const spot = revealed && !front.typedAnswer && !back.typedAnswer ? spotlight(back) : null;
+    const comparison = revealed && front.typedAnswer ? answerComparison(typed,front.typedAnswer.expected,front.typedAnswer.ignoreAccents,inputLang) : '';
+    // In the back's own {{type:}} slot when it checks the same answer; otherwise below the card.
+    const inSlot = !!comparison && back.typedAnswer?.expected === front.typedAnswer?.expected;
     shell(`${header}${practiceState() ? '' : restartStatusMarkup(studyOptions)}${stageStrip(revealed ? 'happy' : 'calm')}${statusMarkup()}${noteNotice ? `<p class="undo-note" role="status">${escapeHtml(noteNotice)}</p>` : ''}<div class="study-tools" aria-label="このカードの教材"><button id="edit-study-note"${busy || pending ? ' disabled' : ''}>ノートを編集</button><button id="suspend-study-note"${busy || pending ? ' disabled' : ''}>出題停止</button></div><section class="card-panel review-panel ${revealed ? 'is-answer' : 'is-question'}" id="card-panel">
       <div class="card-meta"><span class="phase-pill">${revealed ? '答え' : '問題'}</span><span class="card-state">${['新規','学習中','復習','再学習'][card.schedule.state]}</span><span class="card-deck">${escapeHtml(card.deck.name.split('::').at(-1) || '')}</span></div>
       ${spot ? `<div class="spotlight${revealing ? ' is-revealing' : ''}" id="spotlight"><span class="spotlight-word"${spot.lang ? ` lang="${escapeHtml(spot.lang)}"` : ''}>${graphemes(spot.text).map((g,i) => `<span class="g" style="--i:${i}">${escapeHtml(g)}</span>`).join('')}</span><span class="on-air" aria-hidden="true">♪ 読み上げ中</span></div>` : ''}
       ${rendered.speech.length || rendered.sounds.length ? '<div id="audio" class="audio-controls"></div>' : ''}
       <div class="card-sheet"><iframe id="card-frame" title="${revealed ? '答え' : '問題'}" sandbox="allow-same-origin"></iframe></div>
       ${!revealed && front.typedAnswer ? `<div class="type-answer"><label for="answer-input">答えを入力 <span>任意</span></label><input id="answer-input"${inputLang ? ` lang="${escapeHtml(inputLang)}"` : ''} autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="思い出した答えを入力…" value="${escapeHtml(typed)}"></div>` : ''}
-      ${revealed && front.typedAnswer && typed ? `<div class="answer-comparison ${matched ? 'match' : 'different'}"><span>入力した答え</span><strong>${escapeHtml(typed)}</strong><span>${matched ? '一致しています' : '正解と見比べて評価してください'}</span></div>` : ''}
+      ${inSlot ? '' : comparison}
       ${rendered.warnings.length ? `<details class="template-notes"><summary>テンプレートの確認事項</summary><p>${rendered.warnings.map(escapeHtml).join('<br>')}</p></details>` : ''}</section>
       <div class="review-actions" id="actions">${!revealed ? '<button class="primary reveal" id="reveal">答えを表示<kbd>Space</kbd></button>' : `<div class="ratings" role="group" aria-label="評価（どれを選んでもドパは同じです）">${(['もう一度','難しい','普通','簡単'] as const).map((label,i) => `<button class="rating" data-rating="${i+1}" aria-keyshortcuts="${i+1}" ${busy || (pending && pending.rating !== i+1) ? 'disabled' : ''}><span>${label}</span><strong>${practiceState() ? '' : interval(card.preview[(i+1) as 1|2|3|4].due)}</strong><small aria-hidden="true">${i+1}</small></button>`).join('')}</div><p class="rating-help">${busy ? '回答を保存しています…' : pending ? '保存を確認できませんでした。同じ評価を押して再送できます。' : '思い出せた度合いを、そのまま選んでください。どれを押してもドパは同じです。'}</p>`}</div>`,'study');
     revealing = false;
     const iframe = document.querySelector<HTMLIFrameElement>('#card-frame')!;
     iframe.addEventListener('load', () => { const height = iframe.contentDocument?.body.scrollHeight ?? 180; iframe.style.height = `${Math.max(150,height+16)}px`; });
-    iframe.srcdoc = frameDocument(rendered);
+    iframe.srcdoc = frameDocument(rendered,inSlot ? comparison : '');
     document.querySelector<HTMLInputElement>('#answer-input')?.addEventListener('input', e => { typed = (e.target as HTMLInputElement).value; });
     document.querySelector('#reveal')?.addEventListener('click', () => {
       typed = document.querySelector<HTMLInputElement>('#answer-input')?.value ?? typed; revealed = true; revealing = true; stopAudio(); study();

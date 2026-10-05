@@ -208,9 +208,19 @@ main.study{max-width:720px;margin:0 auto;padding:12px 16px 16px}
 .type-answer input{width:100%;border:2px solid var(--line-strong);border-radius:12px;padding:12px 14px;font-size:18px;background:var(--paper)}
 .type-answer input:focus{border-color:var(--blue);background:#fff;outline:none}
 .type-answer input::placeholder{font-size:14px;color:var(--faint)}
-.answer-comparison{margin:10px 4px 4px;border-radius:12px;padding:10px 14px;display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--muted);background:#f3fbf7;border:1.5px solid #bfe8d6}
-.answer-comparison.different{background:#fff6ef;border-color:#f5d2b8}
-.answer-comparison strong{font-size:18px;color:var(--ink);overflow-wrap:anywhere}
+/* Typed answer vs. expected, below the card when its back has no {{type:}} slot (mirrors answerComparisonCss in the card). */
+.answer-comparison{width:fit-content;min-width:min(100%,260px);max-width:calc(100% - 8px);margin:10px auto 4px;padding:12px 16px;border:1.5px solid #f2c9b4;border-radius:14px;background:#fff8f3;font-size:16px;line-height:1.5}
+.answer-comparison.is-match{border-color:#b9e3cd;background:#f2faf5}
+.answer-row+.answer-row{margin-top:8px;padding-top:8px;border-top:1px dashed #ead8cc}
+.answer-label{display:block;font-size:12px;font-weight:600;color:var(--muted);letter-spacing:.04em}
+.answer-value{font-size:24px;font-weight:600;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere}
+.is-input .answer-value{font-weight:500}
+.answer-comparison del{color:#a3301f;background:#fde0d8;text-decoration:line-through 2px;border-radius:4px;padding:0 1px}
+.answer-comparison ins{color:#13603d;background:#d4f0df;text-decoration:underline 2px;text-underline-offset:.18em;border-radius:4px;padding:0 1px}
+.answer-gap{display:inline-block;width:.5em;height:.9em;margin:0 1px;vertical-align:-.08em;border-radius:3px;background:#d4f0df;box-shadow:inset 0 -3px #2b8a5c}
+.answer-status{margin-top:8px;font-size:13px;font-weight:600;color:#13603d}
+.answer-legend{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:10px;font-size:12px;color:var(--muted)}
+.answer-legend del,.answer-legend ins{margin-right:4px;font-weight:600}
 .audio-controls{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:10px;padding:0 4px 10px}
 .audio-controls>span{font-size:10px;color:var(--faint)}
 .audio-button{border:2px solid var(--ink);background:#fff6d1;border-radius:999px;padding:6px 14px;font:700 13px var(--font-pop);box-shadow:0 2px 0 var(--ink)}

@@ -588,17 +588,20 @@ test('keyboard, card iframe, media and escaped stage words are preserved without
   await expect(page.locator('#reveal')).toBeVisible();
   await input.fill('안녕하세요');
   await page.keyboard.press('Enter');
-  await expect(page.locator('#spotlight .spotlight-word')).toHaveText('안녕하세요');
-  await expect(page.locator('#spotlight .spotlight-word')).toHaveAttribute('lang','ko-KR');
+  // A typed card shows its answer once, in the template's {{type:}} slot, compared with the input.
+  await expect(page.locator('#spotlight')).toHaveCount(0);
   const card = page.frameLocator('#card-frame');
-  await expect(card.locator('.expected-answer')).toHaveText('안녕하세요');
+  await expect(card.locator('.answer-comparison.is-match .answer-value')).toHaveText('안녕하세요');
+  await expect(card.locator('.answer-comparison .answer-value')).toHaveAttribute('lang','ko-KR');
+  await expect(card.locator('.expected-answer')).toHaveCount(0);
+  await expect(page.locator('.answer-comparison')).toHaveCount(0);
   // The card document keeps its transparent .card body and light scheme; what shows through stays white.
   expect(await card.locator('html').evaluate(html => getComputedStyle(html).colorScheme)).toBe('light');
   expect(await frame.evaluate(iframe => [getComputedStyle(iframe).backgroundColor,getComputedStyle(iframe.parentElement!).backgroundColor])).toEqual(['rgb(255, 255, 255)','rgb(255, 255, 255)']);
   await expect(card.locator('img.flag')).toHaveAttribute('src',`${BASE}/media/flag.png`);
   await expect.poll(() => card.locator('img.flag').evaluate(img => (img as HTMLImageElement).naturalWidth)).toBe(1);
   await expect(page.locator('#audio audio')).toHaveAttribute('src','/media/hello.mp3');
-  await expect(page.locator('.answer-comparison')).toContainText('一致しています');
+  await expect(card.locator('.answer-comparison')).toContainText('一致しています');
   await expect(page.getByRole('button',{ name: '▶ 読み上げる' })).toBeVisible();
   for (const [i,label] of ['もう一度','難しい','普通','簡単'].entries()) {
     await expect(page.locator(`[data-rating="${i+1}"]`)).toContainText(label);
@@ -626,10 +629,11 @@ test('keyboard, card iframe, media and escaped stage words are preserved without
   await nextQuestion(page);
   await expect(page.locator('#answer-input')).not.toHaveAttribute('lang',/.+/);
   await page.keyboard.press('Enter');
-  const word = page.locator('#spotlight .spotlight-word');
-  await expect(word).toHaveText('x <img src=x onerror=alert(1)>');
-  await expect(word).not.toHaveAttribute('lang',/.+/);
-  await expect(page.locator('#spotlight img')).toHaveCount(0);
+  // Nothing typed: the escaped answer stays in its slot with no comparison and no stage headline.
+  await expect(page.frameLocator('#card-frame').locator('.expected-answer')).toHaveText('x <img src=x onerror=alert(1)>');
+  await expect(page.locator('#spotlight')).toHaveCount(0);
+  await expect(page.locator('.answer-comparison')).toHaveCount(0);
+  await expect(page.frameLocator('#card-frame').locator('.answer-comparison')).toHaveCount(0);
   await expect(page.frameLocator('#card-frame').locator('img')).toHaveCount(0);
   expect(dialogs).toEqual([]);
   expect(errors).toEqual([]);
@@ -746,7 +750,7 @@ for (const [width,height] of [[1280,900],[390,844]] as const) {
     await shot(page,'question');
     await page.locator('#answer-input').fill('안녕하세요');
     await reveal(page);
-    await expect(page.locator('#spotlight')).toBeVisible();
+    await expect(page.frameLocator('#card-frame').locator('.answer-comparison.is-match')).toBeVisible();
     await page.waitForTimeout(120);
     await shot(page,'answer-reveal-120ms');
     await page.waitForTimeout(700);

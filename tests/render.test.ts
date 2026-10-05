@@ -19,6 +19,7 @@ describe('Anki template rendering', () => {
     const c = card(); const front = renderCard(c,'front'); const back = renderCard(c,'back',front.html);
     expect(front.html).toContain('こんにちは'); expect(front.html).not.toContain('안녕하세요'); expect(front.speech).toEqual([]);
     expect(front.typedAnswer?.expected).toBe('안녕하세요'); expect(back.html).toContain('안녕하세요');
+    expect(back.html).toContain('data-dopanki-type-answer');
     expect(back.speech).toEqual([{ text: '안녕하세요', lang: 'ko-KR', voices: ['AwesomeTTS'], rate: 1 }]);
   });
   it('uses independent cloze ordinals with hints and nested deletion', () => {
@@ -39,6 +40,7 @@ describe('Anki template rendering', () => {
     const front = renderCard(c,'front');
     expect(front.html).not.toContain('서울'); expect(front.typedAnswer?.expected).toBe('서울');
     expect(renderCard(c,'back').html).toContain('서울');
+    expect(renderCard(c,'back').html).toContain('data-dopanki-type-answer');
   });
   it('does not replay FrontSide audio and normalizes Hangul keyboard composition', () => {
     const c = card(); c.noteType.templates[0].front = '[sound:test.mp3]{{JP}}'; c.noteType.templates[0].back = '{{FrontSide}}{{KR}}';

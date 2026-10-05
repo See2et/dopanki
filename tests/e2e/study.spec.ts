@@ -19,7 +19,8 @@ test('imported deck: mobile typed answer, persisted FSRS review, undo and safe t
   await page.screenshot({ path: '.local/screenshots/mobile-question.png', fullPage: true });
   await page.getByRole('button',{ name: /答えを表示/ }).click();
   await expect(page.getByRole('button',{ name: '▶ 読み上げる' })).toBeVisible();
-  await expect(page.frameLocator('#card-frame').locator('.expected-answer')).toBeVisible();
+  // The typed answer is compared in the back's {{type:}} slot, or below the card when the back has none.
+  await expect(page.frameLocator('#card-frame').locator('.answer-comparison').or(page.locator('.answer-comparison'))).toBeVisible();
   await expect(page.locator('body')).toHaveJSProperty('scrollWidth',390);
   await page.screenshot({ path: '.local/screenshots/mobile-answer.png', fullPage: true });
   await page.locator('[data-rating="3"]').click();

@@ -77,7 +77,7 @@ export function renderCard(card: StudyCard, side: 'front' | 'back', frontHtml = 
     if (bits.includes('type') && bits.includes('cloze')) {
       const expected = plainText(clozeText(content,ordinal,'back',true));
       result.typedAnswer = { expected, ignoreAccents: bits.includes('nc') };
-      return side === 'front' ? '' : `<div class="expected-answer">${escapeHtml(expected)}</div>`;
+      return side === 'front' ? '' : `<div class="expected-answer" data-dopanki-type-answer>${escapeHtml(expected)}</div>`;
     }
     for (const filter of bits.reverse()) {
       if (filter === 'cloze') content = clozeText(content,ordinal,side);
@@ -86,7 +86,7 @@ export function renderCard(card: StudyCard, side: 'front' | 'back', frontHtml = 
       else if (filter === 'type') {
         const expected = plainText(content);
         result.typedAnswer = { expected, ignoreAccents: bits.includes('nc') };
-        content = side === 'front' ? '' : `<div class="expected-answer">${escapeHtml(expected)}</div>`;
+        content = side === 'front' ? '' : `<div class="expected-answer" data-dopanki-type-answer>${escapeHtml(expected)}</div>`;
       } else if (filter === 'nc') { /* handled by type */ }
       else if (filter.startsWith('tts ')) {
         const options = filter.slice(4).trim().split(/\s+/);
