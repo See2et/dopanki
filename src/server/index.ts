@@ -1,4 +1,5 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
+import { accessEnabled, verifyAccess } from './access';
 import manager, { authorizeBearer, type ManagementEnv } from './manage';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { preview, schedule, studyDayBoundary, type ScheduleState } from '../lib/scheduler';
@@ -7,7 +8,6 @@ import { progress } from '../lib/progress';
 import practice from './practice';
 import studyOptions, { studyContext, studyCandidates, answerAdmission } from './study-options';
 
-type Bindings = { DB: D1Database; MEDIA: R2Bucket; ASSETS: Fetcher; APP_PASSWORD?: string };
 type Env = ManagementEnv;
 export const app = new Hono<Env>();
 const cookieName = 'dopanki_session';
@@ -24,8 +24,17 @@ async function signature(secret: string, value: string) {
   const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   return Array.from(new Uint8Array(await crypto.subtle.sign('HMAC', key, encoder.encode(value)))).map(x => x.toString(16).padStart(2, '0')).join('');
 }
-async function authenticated(c: Parameters<typeof getCookie>[0]) {
-  const secret = (c.env as Bindings).APP_PASSWORD;
+async function accessClaims(c: Context<Env>) {
+  if (c.get('accessClaims') === undefined) c.set('accessClaims', await verifyAccess(c.req.raw, c.env));
+  return c.get('accessClaims');
+}
+async function authenticated(c: Context<Env>) {
+  if (accessEnabled(c.env)) {
+    const claims = await accessClaims(c);
+    // Service tokens must still use a scoped authoring token, never a browser session.
+    return typeof claims?.email === 'string' && !!claims.email;
+  }
+  const secret = c.env.APP_PASSWORD;
   if (!secret) return loopback(c.req.url);
   const token = getCookie(c, cookieName);
   if (!token) return false;
@@ -43,7 +52,10 @@ app.use('/api/*', async (c, next) => {
     if (origin && origin !== new URL(c.req.url).origin) return c.json({ error: '別のサイトからの操作はできません。' }, 403);
     if (!c.req.header('Content-Type')?.startsWith('application/json')) return c.json({ error: 'JSONリクエストが必要です。' }, 415);
   }
-  if (!c.env.APP_PASSWORD && !loopback(c.req.url)) return c.json({ error: 'サーバーのAPP_PASSWORDが未設定です。' }, 503);
+  if (accessEnabled(c.env)) {
+    if (!c.env.ACCESS_TEAM_DOMAIN || !c.env.ACCESS_AUD) return c.json({ error: 'サーバーのAccess認証設定が不完全です。' }, 503);
+    if (!await accessClaims(c)) return c.json({ error: 'Cloudflare Accessでログインしてください。' }, 401);
+  } else if (!c.env.APP_PASSWORD && !loopback(c.req.url)) return c.json({ error: 'サーバーのAPP_PASSWORDが未設定です。' }, 503);
   if (c.req.header('Authorization')) {
     if (!await authorizeBearer(c)) return c.json({ error: 'APIトークンまたは権限が無効です。' }, 401);
   } else if (!['/api/session', '/api/login'].includes(c.req.path) && !await authenticated(c)) return c.json({ error: 'ログインしてください。' }, 401);
@@ -53,8 +65,9 @@ app.use('/api/*', async (c, next) => {
 app.route('/api/manage', manager);
 app.route('/api/practice', practice);
 app.route('/api/study-options', studyOptions);
-app.get('/api/session', async c => c.json({ authenticated: await authenticated(c), passwordRequired: !!c.env.APP_PASSWORD }));
+app.get('/api/session', async c => c.json({ authenticated: await authenticated(c), passwordRequired: !accessEnabled(c.env) && !!c.env.APP_PASSWORD, ...(accessEnabled(c.env) ? { logoutUrl: '/cdn-cgi/access/logout' } : {}) }));
 app.post('/api/login', async c => {
+  if (accessEnabled(c.env)) return c.json({ error: 'Cloudflare Accessを使ってログインしてください。' }, 403);
   const body = await c.req.json().catch(() => null) as { password?: unknown } | null;
   if (!body || typeof body.password !== 'string' || body.password.length > 1024) return c.json({ error: 'パスワードを入力してください。' }, 400);
   if (!c.env.APP_PASSWORD) return c.json({ authenticated: true });
@@ -72,7 +85,10 @@ app.post('/api/login', async c => {
   setCookie(c, cookieName, `${expires}.${await signature(c.env.APP_PASSWORD, expires)}`, { httpOnly: true, secure: new URL(c.req.url).protocol === 'https:', sameSite: 'Strict', path: '/', maxAge: 30 * 86400 });
   return c.json({ authenticated: true });
 });
-app.post('/api/logout', c => { deleteCookie(c, cookieName, { path: '/' }); return c.json({ ok: true }); });
+app.post('/api/logout', c => {
+  deleteCookie(c, cookieName, { path: '/' });
+  return c.json({ ok: true, ...(accessEnabled(c.env) ? { logoutUrl: '/cdn-cgi/access/logout' } : {}) });
+});
 
 interface Metadata { source: ImportDocument['source']; collection: ImportDocument['collection'] }
 async function metadata(db: D1Database) {

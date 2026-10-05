@@ -14,10 +14,11 @@
     "test:e2e": "playwright test",
     "db:migrate": "wrangler d1 migrations apply dopanki --local",
     "import:anki": "tsx src/tools/import-anki.ts",
-    "deploy": "npm run build:web && wrangler deploy"
+    "deploy": "npm run build:web && wrangler deploy --env production"
   },
   "dependencies": {
     "hono": "4.13.12",
+    "jose": "^6.2.12",
     "ts-fsrs": "5.4.2"
   },
   "devDependencies": {

@@ -38,6 +38,7 @@ let lastEvent: string | null = sessionStorage.getItem('dopanki_undo');
 let pending: { eventId: string; cardId: string; revision: number; rating: number; deckId?: string } | null = null;
 let imported = false;
 let passwordRequired = false;
+let accessLogoutUrl: string | null = null;
 let warnings: string[] = [];
 let progress: ProgressResponse | null = null;
 let progressError = false;
@@ -115,7 +116,7 @@ function soundButton() {
 }
 function shell(content: string, mode: 'home' | 'study') {
   const chip = mode === 'home' && festival.count ? `<span class="bar-dopa" data-dopa-total="${festival.total}" title="ドパは演出用の遊びの点数です"><small>ドパ</small><b>${formatDopa(festival.total)}</b></span>` : '';
-  root.innerHTML = `<header class="app-bar"><div class="app-bar-inner"><button class="brand" id="home" aria-label="デッキ一覧へ">${hamster('calm')}<span>Dopanki</span></button><div class="bar-actions">${chip}${soundButton()}<button class="bar-link" id="open-manager">教材管理</button><a href="/api/export" class="bar-link" title="教材と学習状態をJSONで保存">バックアップ</a>${passwordRequired ? '<button class="bar-link" id="logout">ログアウト</button>' : ''}</div></div></header><main class="${mode}">${content}</main>`;
+  root.innerHTML = `<header class="app-bar"><div class="app-bar-inner"><button class="brand" id="home" aria-label="デッキ一覧へ">${hamster('calm')}<span>Dopanki</span></button><div class="bar-actions">${chip}${soundButton()}<button class="bar-link" id="open-manager">教材管理</button><a href="/api/export" class="bar-link" title="教材と学習状態をJSONで保存">バックアップ</a>${passwordRequired || accessLogoutUrl ? '<button class="bar-link" id="logout">ログアウト</button>' : ''}</div></div></header><main class="${mode}">${content}</main>`;
   document.querySelector('#open-manager')?.addEventListener('click', () => {
     if (saving || pending || roundPending || editingNote) return;
     generation++; busy = false; skippedNote = false; noteNotice = ''; answeredCard = null; undoNote = ''; resultNote = null;
@@ -173,7 +174,8 @@ async function logout() {
   if (saving || pending || roundPending || editingNote) return;
   generation++; busy = false; skippedNote = false; noteNotice = ''; answeredCard = null; undoNote = ''; resultNote = null; stopEffects(); clearMedalNotices();
   progressGeneration++; progress = null; progressError = false;
-  await api('/api/logout', {}); clearPractice(); selected = null; current = null; sessionStorage.removeItem('dopanki_undo'); lastEvent = null; login();
+  await api('/api/logout', {}); clearPractice(); selected = null; current = null; sessionStorage.removeItem('dopanki_undo'); lastEvent = null;
+  if (accessLogoutUrl) window.location.assign(accessLogoutUrl); else login();
 }
 function startDeck(id: string) {
   clearPractice(); current = null; studyOptions = null; stopEffects();
@@ -805,6 +807,11 @@ async function undo() {
 }
 function login(message = '') {
   stopEffects();
+  if (!passwordRequired) {
+    root.innerHTML = `<div class="login-page"><div class="login-card"><h1 class="login-brand">Dopanki</h1><p class="error" role="alert">${escapeHtml(message || '認証を確認できませんでした。もう一度読み込んでください。')}</p><button class="primary" id="reload-session">再読み込み</button></div></div>`;
+    document.querySelector('#reload-session')?.addEventListener('click', () => window.location.reload());
+    return;
+  }
   root.innerHTML = `<div class="login-page"><div class="login-card"><div class="login-mascot">${hamster('happy')}</div><h1 class="login-brand">Dopanki</h1><p class="subtle">あなたの教材と、学習の続き。</p><form id="login-form"><label for="password">パスワード</label><input id="password" type="password" autocomplete="current-password" required autofocus><button class="primary" type="submit">ログイン</button><p class="error" role="alert">${escapeHtml(message)}</p></form></div></div>`;
   document.querySelector('#login-form')?.addEventListener('submit', async e => {
     e.preventDefault(); const button = document.querySelector<HTMLButtonElement>('#login-form button')!; button.disabled = true;
@@ -838,5 +845,5 @@ document.addEventListener('keydown', e => {
   else if (revealed && !input && /^[1-4]$/.test(e.key)) { e.preventDefault(); void answer(Number(e.key)); }
 });
 root.innerHTML = '<div class="loading" role="status">Dopankiを読み込んでいます…</div>';
-try { const session = await api<{ authenticated: boolean; passwordRequired: boolean }>('/api/session'); passwordRequired = session.passwordRequired; if (session.authenticated) await refresh(); else login(); }
+try { const session = await api<{ authenticated: boolean; passwordRequired: boolean; logoutUrl?: string }>('/api/session'); passwordRequired = session.passwordRequired; accessLogoutUrl = session.logoutUrl === '/cdn-cgi/access/logout' ? session.logoutUrl : null; if (session.authenticated) await refresh(); else login(); }
 catch (e) { login((e as Error).message); }

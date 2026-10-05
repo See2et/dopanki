@@ -17,3 +17,24 @@ migrations_dir = "migrations"
 [[r2_buckets]]
 binding = "MEDIA"
 bucket_name = "dopanki-media"
+
+# Keep local development bound to its existing database.
+[env.production]
+name = "dopanki"
+# Worker-level Cloudflare Access protects production and preview traffic.
+workers_dev = true
+preview_urls = false
+
+[env.production.vars]
+ACCESS_TEAM_DOMAIN = "https://see2et.cloudflareaccess.com"
+ACCESS_AUD = "e03c14dc00e7b371026b6237d77b3e54aec637ddccc60b75a5aa96fdcb22ccda"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "dopanki"
+database_id = "2e2b4809-3ea5-4bf2-89ac-50af9263ebb1"
+migrations_dir = "migrations"
+
+[[env.production.r2_buckets]]
+binding = "MEDIA"
+bucket_name = "dopanki-media"

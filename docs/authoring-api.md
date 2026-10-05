@@ -1,6 +1,6 @@
 # Dopanki 教材管理API
 
-画面とAIが共通に使うHTTP API。ベースURLは `/api/manage`。JSONで送受信し、変更リクエストの `Content-Type` は `application/json` とする。実環境はHTTPSを使用する。画面からAPIトークンを発行し、`Authorization: Bearer dpk_...` を送る。Cloudflare公開環境では従来どおり `APP_PASSWORD` の設定も必須。
+画面とAIが共通に使うHTTP API。ベースURLは `/api/manage`。JSONで送受信し、変更リクエストの `Content-Type` は `application/json` とする。実環境はHTTPSを使用する。画面からAPIトークンを発行し、`Authorization: Bearer dpk_...` を送る。本番ではCloudflare Accessの認証も必要。ブラウザはAccessセッション、AIなどの機械はAccessのサービス認証とDopankiのAPIトークンを併用する。サービス認証だけではブラウザ用の権限を得られない。
 
 ## 認証・権限
 

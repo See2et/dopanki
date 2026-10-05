@@ -203,7 +203,17 @@ DOPANKI_URL=http://127.0.0.1:5173 npx playwright test tests/e2e/study-options.sp
 
 ## Cloudflareに配置する
 
-Workers＋D1＋R2用の構成とドライラン検証を用意しています。この作業ではまだ外部へ公開していません。
+Workers＋D1＋R2で配置します。本番は`production`環境を使い、ローカルのDBとは分けています。本番URLは https://dopanki.seezet1024.workers.dev です。Cloudflare AccessのWorkerポリシーで本番・プレビューの全通信を保護し、所有者のメールアドレスだけを許可しています。プレビューURLは無効です。
+
+既存の本番環境を更新する場合は、次を実行します。保存済みの教材・学習状態と秘密は引き継がれます。
+
+```sh
+npm run deploy
+# DBの変更があるときだけ
+npx wrangler d1 migrations apply dopanki --env production --remote
+```
+
+初めて別アカウントへ配置する場合は、以下の手順でリソースを作成します。最初は`[env.production]`の`workers_dev`を`false`にして配置し、Cloudflare管理画面のWorkers & Pages → dopanki → Accessで「すべてのTraffic」と自分のメールアドレスだけを許可するポリシーを設定します。設定を確認してから`workers_dev = true`で再配置してください。
 
 ```sh
 npx wrangler login
@@ -211,14 +221,13 @@ npx wrangler d1 create dopanki
 npx wrangler r2 bucket create dopanki-media
 ```
 
-表示されたdatabase_idを`wrangler.toml`へ設定します。次にログイン用の秘密とDBを準備します。
+表示されたdatabase_idを`wrangler.toml`の`[[env.production.d1_databases]]`へ設定します。AccessアプリケーションのAUDタグとチームURLを`[env.production.vars]`の`ACCESS_AUD`・`ACCESS_TEAM_DOMAIN`へ設定し、DBを準備します。
 
 ```sh
-npx wrangler secret put APP_PASSWORD
-npx wrangler d1 migrations apply dopanki --remote
-# Ankiから移行する場合だけ実行（新規作成で始める場合は省略）
-npm run import:anki -- /path/to/deck.apkg --remote
+npx wrangler d1 migrations apply dopanki --env production --remote
 npm run deploy
 ```
 
-公開環境ではAPP_PASSWORDを必須にしています。単一の個人コレクション用で、ユーザー登録・複数ユーザー分離・Ankiとの双方向同期はまだありません。
+ローカルの現在の状態を移す場合は、空の本番DBへローカルDBのSQLエクスポートを取り込みます。元のAnkiファイルを再取り込みすると、Dopankiで行った学習・教材編集は引き継がれません。既存の本番DBへ初期データを再取り込みしないでください。メディアがある場合はR2への移行も必要です。
+
+本番の本人確認はCloudflare Accessだけで行い、Dopanki独自のパスワード入力はありません。アプリはAccess JWTの署名・発行元・AUD・有効期限を検証します。ログアウトはAccessのセッションを終了するため、同じチームの他アプリにも影響します。ローカルLAN利用時は引き続き`APP_PASSWORD`を使います。AI用APIにはDopankiのAPIトークンに加えてAccessの機械向け認証が必要です。Accessのサービス認証だけでは学習・バックアップ・トークン管理を操作できません。単一の個人コレクション用で、ユーザー登録・複数ユーザー分離・Ankiとの双方向同期はまだありません。

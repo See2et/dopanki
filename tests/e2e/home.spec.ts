@@ -20,7 +20,7 @@ const decks = [
   deck('en', '英語', null, { new: 5, learning: 0, review: 12, total: 300 }),
 ];
 
-async function setup(page: Page, options: { lastDeck?: string; failProgress?: boolean; passwordRequired?: boolean; width?: number } = {}) {
+async function setup(page: Page, options: { lastDeck?: string; failProgress?: boolean; passwordRequired?: boolean; access?: boolean; width?: number } = {}) {
   let failProgress = !!options.failProgress;
   const days = Array.from({ length: 182 }, (_,i) => {
     const date = new Date(Date.UTC(2026,9,4) - (181-i)*86400000).toISOString().slice(0,10);
@@ -30,7 +30,8 @@ async function setup(page: Page, options: { lastDeck?: string; failProgress?: bo
   await page.route(`${BASE}/api/**`, async route => {
     const path = new URL(route.request().url()).pathname;
     const respond = (data: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(data) });
-    if (path === '/api/session') return respond({ authenticated: true, passwordRequired: !!options.passwordRequired });
+    if (path === '/api/session') return respond({ authenticated: true, passwordRequired: !!options.passwordRequired, ...(options.access ? { logoutUrl: '/cdn-cgi/access/logout' } : {}) });
+    if (path === '/api/logout') return respond({ ok: true });
     if (path === '/api/overview') return respond({ imported: true, warnings: [], decks });
     if (path === '/api/progress') {
       if (failProgress) return respond({ error: '集計を取得できませんでした' }, 500);
@@ -65,6 +66,21 @@ async function noOverflow(page: Page) {
   const scroll = await page.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth));
   expect(scroll).toBeLessThanOrEqual(width);
 }
+
+test('Access sessions open the home directly and log out through Access', async ({ page }) => {
+  await setup(page, { access: true });
+  await expect(page.locator('#password')).toHaveCount(0);
+  await page.route('**/cdn-cgi/access/logout', route => route.fulfill({ contentType: 'text/html', body: '<h1>Access logout</h1>' }));
+  await page.getByRole('button', { name: 'ログアウト', exact: true }).click();
+  await expect(page).toHaveURL(`${BASE}/cdn-cgi/access/logout`);
+});
+
+test('authentication failure offers retry without an independent password prompt', async ({ page }) => {
+  await page.route('**/api/session', route => route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: 'Cloudflare Accessでログインしてください。' }) }));
+  await page.goto(BASE);
+  await expect(page.getByRole('button', { name: '再読み込み' })).toBeVisible();
+  await expect(page.locator('#password')).toHaveCount(0);
+});
 async function inFirstView(page: Page, selector: string) {
   const box = (await page.locator(selector).boundingBox())!;
   expect(box.y + box.height).toBeLessThanOrEqual(page.viewportSize()!.height);

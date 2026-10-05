@@ -1,9 +1,11 @@
 import { Hono, type Context } from 'hono';
+import type { JWTPayload } from 'jose';
+import type { AccessBindings } from './access';
 import { defaultConfig, validateConfig, type ScheduleState } from '../lib/scheduler';
 import { schedulerConfig, type Deck, type DeckConfig, type Note, type NoteType } from '../lib/types';
 import type { ApiScope, ManagedDeck, ManagedNote, ManagedNoteType, NoteInput, NotePatch, NoteTypeInput, TokenInfo } from '../lib/manage-types';
 
-export type ManagementEnv = { Bindings: { DB: D1Database; MEDIA: R2Bucket; ASSETS: Fetcher; APP_PASSWORD?: string }; Variables: { actor: string; input: Record<string,unknown> } };
+export type ManagementEnv = { Bindings: AccessBindings & { DB: D1Database; MEDIA: R2Bucket; ASSETS: Fetcher; APP_PASSWORD?: string }; Variables: { actor: string; input: Record<string,unknown>; accessClaims: JWTPayload | null } };
 type C = Context<ManagementEnv>;
 class DomainError extends Error { constructor(message: string, public status: 400|404|409|413 = 400) { super(message); } }
 const requireValue: (value: unknown, message: string) => asserts value = (value,message) => { if (!value) throw new DomainError(message); };
