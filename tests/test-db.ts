@@ -3,6 +3,9 @@ export class TestDb {
   sqlite = new DatabaseSync(':memory:');
   queries = 0;
   afterFirst?: (sql:string) => void;
+  afterAll?: (sql:string) => void;
+  beforeRun?: (sql:string) => void;
+  reads: {sql:string;args:(string|number|null)[];rows:number;method:'first'|'all'}[] = [];
   prepare(sql: string) {
     this.queries++;
     const db = this.sqlite;
@@ -10,9 +13,9 @@ export class TestDb {
     let args: (string | number | null)[] = [];
     const statement = {
       bind(...values: (string | number | null)[]) { args = values; return statement; },
-      async first() { const row=db.prepare(sql).get(...args) ?? null; owner.afterFirst?.(sql); return row; },
-      async all() { return { results: db.prepare(sql).all(...args), success: true, meta: {} }; },
-      async run() { const result = db.prepare(sql).run(...args); return { results: [], success: true, meta: { changes: Number(result.changes) } }; },
+      async first() { const row=db.prepare(sql).get(...args) ?? null; owner.reads.push({sql,args:[...args],rows:row?1:0,method:'first'}); owner.afterFirst?.(sql); return row; },
+      async all() { const results=db.prepare(sql).all(...args); owner.reads.push({sql,args:[...args],rows:results.length,method:'all'}); owner.afterAll?.(sql); return { results, success: true, meta: {} }; },
+      async run() { owner.beforeRun?.(sql); const result = db.prepare(sql).run(...args); return { results: [], success: true, meta: { changes: Number(result.changes) } }; },
     };
     return statement;
   }

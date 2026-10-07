@@ -40,7 +40,7 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(new Date('2026-10-04T18:59:00Z'));
   db = new TestDb();
-  for (const migration of ['0001_initial','0002_history_time','0003_authoring','0004_custom_practice','0005_practice_deletion','0006_study_options','0007_restart_new_limit']) {
+  for (const migration of ['0001_initial','0002_history_time','0003_authoring','0004_custom_practice','0005_practice_deletion','0006_study_options','0007_restart_new_limit','0008_read_reduction']) {
     db.sqlite.exec(readFileSync(`migrations/${migration}.sql`,'utf8'));
   }
   db.sqlite.exec(importStatements(fixture()).join(';')+';');
@@ -123,6 +123,14 @@ describe('progress calendar and tomorrow workload', () => {
     expect(result.todayAnswers).toBe(1);
     expect(result.totalStudyDays).toBe(2);
     expect(result.tomorrow.dueCards).toBe(1);
+    // The same DST split must survive persisted historical backfill and reuse,
+    // not just the live current-UTC-day path.
+    vi.setSystemTime(Date.parse(now)+3*86400000);
+    const historical=await readProgress();
+    expect(historical.totalStudyDays).toBe(2);
+    expect(historical.days.find(day=>day.date===previous)?.answers).toBe(1);
+    expect(historical.days.find(day=>day.date===today)?.answers).toBe(1);
+    expect((await readProgress()).days).toEqual(historical.days);
   });
 
   it('counts practice across the study-day rollover, excludes future and undone events, and leaves normal workload unchanged', async () => {

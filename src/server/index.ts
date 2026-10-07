@@ -6,7 +6,7 @@ import { preview, schedule, studyDayBoundary, nextStudyDayBoundary, type Schedul
 import { schedulerConfig, type ImportDocument, type Deck, type StoredCard, type StudyResponse, type Note, type NoteType } from '../lib/types';
 import { progress } from '../lib/progress';
 import practice from './practice';
-import studyOptions, { studyContext, studyCandidates, answerAdmission, validFocusIds, intradayLearning, importedIntraday } from './study-options';
+import studyOptions, { studyContext, studyCandidates, answerAdmission, validFocusIds, intradayLearning, importedIntraday, preloadOverviewCandidates, optionsResponse } from './study-options';
 
 type Env = ManagementEnv;
 export const app = new Hono<Env>();
@@ -120,6 +120,7 @@ async function restoreBuried(db: D1Database, meta: Metadata, now: number) {
 async function deckSummaries(db: D1Database, _meta: Metadata, now: number) {
   const ctx=await studyContext(db,now);
   if(!ctx)return [];
+  await preloadOverviewCandidates(ctx);
   for(const deck of ctx.decks) {
     const candidates=await studyCandidates(ctx,deck.id);
     if(candidates)deck.counts=candidates.counts;
@@ -151,7 +152,10 @@ app.get('/api/study/:deck', async c => {
   const deck=decks.find(d=>d.id===c.req.param('deck'));
   if(!deck)return c.json({error:'デッキが見つかりません。'},404);
   const candidates=(await studyCandidates(ctx,deck.id,focusIds))!;
-  const counts={counts:candidates.counts,answeredToday:deck.answeredToday,studyDayBoundary:ctx.boundary,
+  const options=(await optionsResponse(ctx,deck.id,false))!;
+  const restart=options.restart;
+  const status={...options,restart:restart?((({days: _days,...summary})=>summary)(restart)):null};
+  const counts={status,counts:candidates.counts,answeredToday:deck.answeredToday,studyDayBoundary:ctx.boundary,
     learningPending:candidates.learningPending,nextLearningDue:candidates.nextLearningDue,candidateIds:candidates.candidateIds,
     ...(candidates.focusRemainingIds?{focusRemainingIds:candidates.focusRemainingIds}:{})};
   const row=candidates.row;

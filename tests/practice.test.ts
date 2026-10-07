@@ -54,7 +54,7 @@ beforeEach(() => {
     '0002_history_time.sql',
     '0003_authoring.sql',
     '0004_custom_practice.sql',
-    '0005_practice_deletion.sql','0006_study_options.sql','0007_restart_new_limit.sql',
+    '0005_practice_deletion.sql','0006_study_options.sql','0007_restart_new_limit.sql','0008_read_reduction.sql',
   ])
     db.sqlite.exec(readFileSync(`migrations/${f}`, 'utf8'));
   db.sqlite.exec(importStatements(fixture()).join(';') + ';');

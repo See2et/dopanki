@@ -2,8 +2,8 @@ import './style.css';
 import { api as requestApi, ApiError } from './http';
 import { openManager } from './manager';
 import { openStudyNote } from './study-note';
-import { completionOptionsMarkup, completionTitle, openStudyOptions, restartStatusMarkup, restartSummary, studyOptionsPath } from './study-options';
-import type { StudyOptionsResponse } from '../src/lib/study-options-types';
+import { completionOptionsMarkup, completionTitle, openStudyOptions, restartStatusMarkup, restartSummary } from './study-options';
+import type { StudyStatus } from '../src/lib/study-options-types';
 import { openPracticeCreator, practiceMarkup, practiceRequestId } from './practice';
 import type { PracticeSession, PracticeStudyResponse } from '../src/lib/practice-types';
 import { escapeHtml, renderCard, type RenderedCard } from '../src/lib/render';
@@ -22,7 +22,7 @@ import type { ScheduleState } from '../src/lib/scheduler';
 const root = document.querySelector<HTMLDivElement>('#app')!;
 let decks: DeckSummary[] = [];
 let selected: string | null = sessionStorage.getItem('dopanki_deck');
-let studyOptions: StudyOptionsResponse | null = null;
+let studyOptions: StudyStatus | null = null;
 let current: StudyResponse | PracticeStudyResponse | null = null;
 let practiceId: string | null = sessionStorage.getItem('dopanki_practice');
 let focusEnabled = localStorage.getItem('dopanki_focus') !== 'off';
@@ -62,6 +62,11 @@ let warnings: string[] = [];
 let progress: ProgressResponse | null = null;
 let progressError = false;
 let progressGeneration = 0;
+let progressDirty = true;
+let progressFlight: { generation:number; promise:Promise<void> } | null = null;
+function invalidateProgress() {
+  progressGeneration++; progressDirty = true; progress = null; progressError = false;
+}
 let errorMessage = '';
 let generation = 0;
 let deckQuery = '';
@@ -161,27 +166,41 @@ function progressSlot(mode: 'home' | 'summary') {
   return `<div data-progress-slot="${mode}">${progressMarkup(progress,progressError,mode)}</div>`;
 }
 function bindProgressSlots() {
-  document.querySelectorAll('[data-progress-slot]').forEach(slot => bindProgress(slot, () => void refreshProgress()));
+  document.querySelectorAll('[data-progress-slot]').forEach(slot => bindProgress(slot, () => void refreshProgress(true)));
+  // A card, focused batch result and reward stage have no aggregate slot.
+  // Rendering a visible home/completion slot is the sole source of read demand.
+  void refreshProgress();
 }
-async function refreshProgress() {
-  const request = ++progressGeneration;
-  progress = null; progressError = false;
+function refreshProgress(retry=false):Promise<void> {
+  if (!document.querySelector('[data-progress-slot]')) return Promise.resolve();
+  if (progressFlight?.generation === progressGeneration) return progressFlight.promise;
+  if (!progressDirty && !retry) return Promise.resolve();
+  const request = progressGeneration;
+  progressDirty = false; progressError = false;
   const paint = () => {
     document.querySelectorAll<HTMLElement>('[data-progress-slot]').forEach(slot => {
       slot.innerHTML = progressMarkup(progress,progressError,slot.dataset.progressSlot as 'home' | 'summary');
+      bindProgress(slot, () => void refreshProgress(true));
     });
-    bindProgressSlots();
   };
   paint();
-  try {
-    const data = await api<ProgressResponse | null>('/api/progress');
-    if (request !== progressGeneration) return;
-    progress = data;
-  } catch {
-    if (request !== progressGeneration) return;
-    progressError = true;
-  }
-  paint();
+  const promise = (async () => {
+    try {
+      // Handle auth only for the current demand: a late pre-login 401 must not
+      // put a successfully recovered session back into auth recovery.
+      const data = await requestApi<ProgressResponse | null>('/api/progress');
+      if (request !== progressGeneration) return;
+      progress = data;
+    } catch (error) {
+      if (request !== progressGeneration) return;
+      if (error instanceof ApiError && error.reauthenticate) authRecovery = true;
+      progressError = true;
+    }
+    if (request === progressGeneration) paint();
+  })();
+  progressFlight = {generation:request,promise};
+  void promise.finally(() => { if (progressFlight?.promise === promise) progressFlight = null; });
+  return promise;
 }
 function statusMarkup() {
   return `${errorMessage ? `<div class="error" role="alert">${escapeHtml(errorMessage)}</div>` : ''}${authRecovery || (errorMessage && (passwordRequired || accessLogoutUrl)) ? '<button class="secondary" id="reauthenticate">ログインを確認</button>' : ''}`;
@@ -199,7 +218,7 @@ async function leave(farewell = false) {
 async function logout() {
   if (saving || pending || roundPending || editingNote) return;
   generation++; busy = false; skippedNote = false; noteNotice = ''; answeredCard = null; undoNote = ''; resultNote = null; stopEffects(); clearMedalNotices();
-  progressGeneration++; progress = null; progressError = false;
+  invalidateProgress();
   await api('/api/logout', {}); clearPractice(); selected = null; current = null; sessionStorage.removeItem('dopanki_undo'); lastEvent = null;
   if (accessLogoutUrl) window.location.assign(accessLogoutUrl); else login();
 }
@@ -884,7 +903,7 @@ async function nextPracticeRound(mode: 'all'|'again') {
 async function refresh() {
   // Never replace an answer or round whose write has not been confirmed.
   if (pending || roundPending || saving) return;
-  void refreshProgress();
+  invalidateProgress();
   try {
     const data = await api<{ imported: boolean; decks: DeckSummary[]; warnings: string[] }>('/api/overview');
     if (!data || typeof data.imported !== 'boolean' || !Array.isArray(data.decks) || !Array.isArray(data.warnings)) throw new Error('デッキ情報を確認できませんでした。もう一度お試しください。');
@@ -898,18 +917,16 @@ async function loadCard(nextBatch = false) {
   if (pending || roundPending || (!selected && !practiceId)) return;
   if (nextBatch && busy) return;
   stopLearningTimer();
-  // Every queue reload can reflect a suspension, rollover or another screen's updates.
-  // Keep the aggregate fresh without making it a prerequisite for learning.
-  void refreshProgress();
+  // Reloads can reflect rollover, suspension, or another screen's updates.
+  // Invalidate now; only a visible completion/home slot will fetch it.
+  invalidateProgress();
   const request = ++generation;
   busy = true; errorMessage = '';
   try {
-    const optionsRequest = !practiceId ? api<StudyOptionsResponse>(studyOptionsPath(selected!)).catch(() => null) : Promise.resolve(null);
     let batch = activeFocus();
     const studyPath = () => `/api/study/${encodeURIComponent(selected!)}`;
     const restrictedPath = (s: FocusSession) => `${studyPath()}?focusIds=${encodeURIComponent((s.batch.pending.length ? s.batch.pending : s.batch.ids).join(','))}`;
     let response = await api<StudyResponse | PracticeStudyResponse>(practiceId ? `/api/practice/${encodeURIComponent(practiceId)}` : batch && !nextBatch ? restrictedPath(batch) : studyPath());
-    const options = await optionsRequest;
     if (request !== generation) return;
     if (!practiceId && 'candidateIds' in response && focusEnabled) {
       if (batch && batch.batch.day !== response.studyDayBoundary) {
@@ -931,7 +948,7 @@ async function loadCard(nextBatch = false) {
         focusSession = reconcileFocus(activeFocus()!,response.focusRemainingIds); saveFocus();
       }
     }
-    studyOptions = options; current = response;
+    studyOptions = 'status' in response ? response.status ?? null : null; current = response;
     if ('practice' in response) lastEvent = response.practice.lastEventId;
     skippedNote = false; noteNotice = ''; revealed = false; typed = ''; pending = null; busy = false;
     if (answeredCard && reward && !response.card && !activeFocus() && !('learningPending' in response && response.learningPending > 0)) finale = true;
@@ -968,7 +985,7 @@ async function answer(rating: number) {
       saveFocus();
     }
     lastEvent = eventId; if (!practiceId) sessionStorage.setItem('dopanki_undo',lastEvent);
-    pending = null; saving = false; stopAudio();
+    pending = null; saving = false; stopAudio(); invalidateProgress();
     // Only a confirmed save reaches this point, so failures and 409 never earn festival points or
     // medals; medals.ts ignores an event it has already seen (a retried save).
     const awarded = awardMedals(medals,eventId,rated);
@@ -1001,7 +1018,7 @@ async function undo() {
     resultNote = null;
     undoNote = revoked ? `取り消しました。${formatDopa(revoked.record.amount)}ドパも戻しました。` : '取り消しました。';
     announce(undoNote);
-    saving = false; answeredCard = null;
+    saving = false; answeredCard = null; invalidateProgress();
     await loadCard();
   }
   catch (e) {
@@ -1011,13 +1028,13 @@ async function undo() {
   }
 }
 async function resumeAuthenticated() {
-  authRecovery = false; recoveringSession = false; errorMessage = '';
+  authRecovery = false; recoveringSession = false; errorMessage = ''; invalidateProgress();
   // Authentication is not permission to replay a write, nor to discard its event ID.
   // Keep the same card and rating; the learner explicitly resends if needed.
   if (current) study(); else await refresh();
 }
 function login(message = '', resume = false) {
-  recoveringSession = true;
+  invalidateProgress(); recoveringSession = true;
   stopAudio(); silenceSound(); stopLearningTimer();
   if (!resume) stopEffects();
   if (!passwordRequired) {

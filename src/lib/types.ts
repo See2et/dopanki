@@ -46,6 +46,8 @@ export interface DeckSummary extends Deck {
   counts: Counts; answeredToday: number;
 }
 export interface StudyResponse {
+  /** Lightweight live controls; the detailed restart calendar is fetched on dialog demand. */
+  status?: import('./study-options-types').StudyStatus;
   card: StudyCard | null; counts: Counts; nextDue: number | null; answeredToday: number;
   studyDayBoundary: number; learningPending: number; nextLearningDue: number | null;
   candidateIds: string[]; focusRemainingIds?: string[];

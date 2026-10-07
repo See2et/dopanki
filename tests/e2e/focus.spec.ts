@@ -11,7 +11,7 @@ const BASE = process.env.DOPANKI_URL || 'http://127.0.0.1:5174';
 const SHOTS = '.local/verification/focus';
 async function setup(page: Page, options: { count?: number; step?: number } = {}) {
   const db = new TestDb();
-  for (const migration of ['0001_initial','0003_authoring','0004_custom_practice','0005_practice_deletion','0006_study_options','0007_restart_new_limit']) db.sqlite.exec(readFileSync(`migrations/${migration}.sql`,'utf8'));
+  for (const migration of ['0001_initial','0003_authoring','0004_custom_practice','0005_practice_deletion','0006_study_options','0007_restart_new_limit','0008_read_reduction']) db.sqlite.exec(readFileSync(`migrations/${migration}.sql`,'utf8'));
   const d = fixture();
   d.cards = Array.from({length:options.count ?? 13},(_,i)=>({...d.cards[0],id:String(i+1)}));
   if (options.step) d.decks[0].config.relearningSteps = [options.step];

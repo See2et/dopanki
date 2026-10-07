@@ -13,7 +13,7 @@ async function req(path:string,body?:unknown,method=body===undefined?'GET':'POST
 }
 const manage=(path:string,body?:Record<string,unknown>,method?:string,headers?:Record<string,string>)=>req('/api/manage'+path,body===undefined?undefined:{requestId:key(),...body},method,headers);
 const definition={name:'言語',fieldDefinitions:[{id:'prompt',name:'問題',required:true},{id:'answer',name:'答え',required:true},{id:'hint',name:'補足',required:false}],templates:[{id:'forward',name:'順方向',front:'{{問題}}',back:'{{FrontSide}}<hr>{{答え}}{{#補足}}<aside>{{補足}}</aside>{{/補足}}'}],css:'.card {font-size:24px}'};
-beforeEach(()=>{db=new TestDb();for(const f of ['0001_initial.sql','0002_history_time.sql','0003_authoring.sql','0004_custom_practice.sql','0005_practice_deletion.sql','0006_study_options.sql','0007_restart_new_limit.sql'])db.sqlite.exec(readFileSync(`migrations/${f}`,'utf8'));db.sqlite.exec(importStatements(fixture()).join(';')+';');});
+beforeEach(()=>{db=new TestDb();for(const f of ['0001_initial.sql','0002_history_time.sql','0003_authoring.sql','0004_custom_practice.sql','0005_practice_deletion.sql','0006_study_options.sql','0007_restart_new_limit.sql','0008_read_reduction.sql'])db.sqlite.exec(readFileSync(`migrations/${f}`,'utf8'));db.sqlite.exec(importStatements(fixture()).join(';')+';');});
 afterEach(()=>db.sqlite.close());
 describe('authoring through the shared API',()=>{
  it.each(['field','template'])('guards %s removal against concurrent first-note creation',async(kind)=>{

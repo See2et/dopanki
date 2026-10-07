@@ -33,7 +33,7 @@ const restart=(flatten=false,dailyReviewLimit=2,backlogPerDay=2,previewToken?:st
 const answer=(id:string,revision=0,rating=3,deckId='1',eventId=`answer-event-${id.padStart(5,'0')}`)=>post('/api/review',{eventId,cardId:id,revision,rating,deckId});
 beforeEach(()=>{
   vi.useFakeTimers();vi.setSystemTime(now);db=new TestDb();
-  for(const f of ['0001_initial','0002_history_time','0003_authoring','0004_custom_practice','0005_practice_deletion','0006_study_options','0007_restart_new_limit'])db.sqlite.exec(readFileSync(`migrations/${f}.sql`,'utf8'));
+  for(const f of ['0001_initial','0002_history_time','0003_authoring','0004_custom_practice','0005_practice_deletion','0006_study_options','0007_restart_new_limit','0008_read_reduction'])db.sqlite.exec(readFileSync(`migrations/${f}.sql`,'utf8'));
   seed(doc());
 });
 afterEach(()=>{db.sqlite.close();vi.useRealTimers();});

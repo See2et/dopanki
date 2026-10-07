@@ -34,7 +34,7 @@ interface PreviewRow { token: string; deck_id: string; generation: number; study
 export interface StudyContext {
   db: D1Database; now: number; boundary: number; generation: number;
   collection: ImportDocument['collection']; decks: DeckSummary[]; originalDecks: Deck[];
-  answers: DeckAnswers[]; extras: ExtraRow[]; restarts: RestartRow[]; members: Member[];
+  totals: DeckTotals[]; answers: DeckAnswers[]; extras: ExtraRow[]; restarts: RestartRow[]; members: Member[];
   restartUsage: {id:string;cards:number}[]; creditEvents:CreditEvent[]; cards?:StoredCard[]; retrievabilities?:Map<string,number>; memberIndex?:Map<string,Member>; activeMemberCache?:Map<string,Member|undefined>;
 }
 const parse = <T>(value: string): T => JSON.parse(value) as T;
@@ -111,7 +111,7 @@ export async function studyContext(db: D1Database, now: number): Promise<StudyCo
   // summarizeDecks also derives virtual ancestors; keep the adjusted virtual configuration below.
   const adjustedTotals = summarizeDecks(adjusted,totals.results,answers.results);
   return { db,now,boundary,generation:meta.generation,collection,decks:adjustedTotals,originalDecks,
-    answers:answers.results,extras:extras.results,restarts:restarts.results,members:members.results,restartUsage:parse(data!.restart_usage),creditEvents:parse(data!.credits) };
+    totals:totals.results,answers:answers.results,extras:extras.results,restarts:restarts.results,members:members.results,restartUsage:parse(data!.restart_usage),creditEvents:parse(data!.credits) };
 }
 
 function restartExtra(ctx:StudyContext,restart:RestartRow,category:'new'|'review'='review'):number {
@@ -234,13 +234,26 @@ export function answerAdmission(ctx: StudyContext, card: StoredCard, selectedId?
     extraDeckId:allowance.restart?grant:undefined,ordinaryExtraDeckId:allowance.restart?undefined:grant};
 }
 
-export async function restartStatus(ctx: StudyContext, restart: RestartRow): Promise<RestartStatus> {
-  const current=await ctx.db.prepare(`SELECT m.* FROM study_restart_members m JOIN cards c ON c.id=m.card_id
-    WHERE m.restart_id=? AND m.answered_event_id IS NULL AND m.revision=c.revision AND c.queue=2 AND c.state=2`).bind(restart.id).all<Member>();
+export async function restartStatus(ctx: StudyContext, restart: RestartRow, detailed=true): Promise<RestartStatus> {
   const owner=ctx.decks.find(d=>d.id===restart.deck_id);
   const validIds=owner?scopeOf(ctx.decks,owner):[];
-  const validCards=await ctx.db.prepare('SELECT id FROM cards WHERE deck_id IN(SELECT value FROM json_each(?))').bind(JSON.stringify(validIds)).all<{id:string}>();
-  const validMembers=current.results.filter(m=>validCards.results.some(c=>c.id===m.card_id));
+  const from=`FROM study_restart_members m JOIN cards c ON c.id=m.card_id
+    WHERE m.restart_id=? AND m.answered_event_id IS NULL AND m.revision=c.revision AND c.queue=2 AND c.state=2
+    AND c.deck_id IN(SELECT value FROM json_each(?))`;
+  const args=[restart.id,JSON.stringify(validIds)];
+  if(!detailed) {
+    const counts=await ctx.db.prepare(`SELECT COALESCE(SUM(m.backlog),0) AS remaining,
+      COALESCE(SUM(m.backlog=1 AND m.available_at<=?),0) AS available ${from}`).bind(ctx.now,...args).first<{remaining:number;available:number}>();
+    const extraLeft=remainingRestartExtra(ctx,restart);
+    const totalLeft=Math.max(0,restart.daily_review_limit-baseUsed(ctx,parse(restart.scope),'review'))+extraLeft;
+    const usedToday=backlogUsed(ctx,restart.id)-ctx.creditEvents.filter(e=>e.restart_id===restart.id&&e.backlog).length;
+    return {id:restart.id,revision:restart.revision,dailyReviewLimit:restart.daily_review_limit,dailyNewLimit:restart.daily_new_limit,
+      backlogPerDay:restart.backlog_per_day,paused:!!restart.paused,flattened:!!restart.flattened,
+      backlogTotal:restart.backlog_total,backlogRemaining:counts!.remaining,
+      backlogToday:Math.min(totalLeft,Math.max(0,restart.backlog_per_day-usedToday)+extraLeft,counts!.available),days:[]};
+  }
+  const current=await ctx.db.prepare(`SELECT m.* ${from}`).bind(...args).all<Member>();
+  const validMembers=current.results;
   const remaining=validMembers.filter(m=>m.backlog);
   const daily=new Map<string,number>();
   for(const m of validMembers) {
@@ -280,11 +293,13 @@ function displayedRestart(ctx:StudyContext,selectedId:string):RestartRow|null {
   });
   return matches.length===1?matches[0]:null;
 }
-export async function optionsResponse(ctx: StudyContext, selectedId: string): Promise<StudyOptionsResponse|null> {
+export async function optionsResponse(ctx: StudyContext, selectedId: string, detailed=true): Promise<StudyOptionsResponse|null> {
   const selected=ctx.decks.find(d=>d.id===selectedId);
   if(!selected)return null;
   const scope=scopeOf(ctx.decks,selected);
-  const cards=await ctx.db.prepare('SELECT * FROM cards WHERE deck_id IN(SELECT value FROM json_each(?)) AND queue IN(0,2)').bind(JSON.stringify(scope)).all<StoredCard>();
+  // Reuse the SQL aggregate already captured by studyContext, before quota caps.
+  // Neither a dialog nor a per-card live summary needs another scope scan just to count.
+  const available=ctx.totals.filter(t=>scope.includes(t.deck_id)).reduce((n,t)=>({new:n.new+t.new,review:n.review+t.review}),{new:0,review:0});
   const restart=displayedRestart(ctx,selectedId);
   const grants=ctx.extras.filter(e=>{
     const owner=ctx.decks.find(d=>d.id===e.deck_id);
@@ -293,10 +308,16 @@ export async function optionsResponse(ctx: StudyContext, selectedId: string): Pr
   return {deckId:selectedId,studyDay:studyDate(ctx.now,ctx.collection.timeZone,ctx.collection.dayStart),
     limits:{new:restart&&!restart.paused?restart.daily_new_limit+restartExtra(ctx,restart,'new'):selected.config.newPerDay,
       review:restart&&!restart.paused?restart.daily_review_limit+restartExtra(ctx,restart):selected.config.reviewPerDay??9999},
-    available:{new:cards.results.filter(c=>c.queue===0).length,
-      review:cards.results.filter(c=>c.queue===2&&c.due<=ctx.now).length},
+    available,
     extra:{new:grants.reduce((n,e)=>n+e.new_extra,0),review:grants.reduce((n,e)=>n+e.review_extra,0)},
-    restart:restart?await restartStatus(ctx,restart):null};
+    restart:restart?await restartStatus(ctx,restart,detailed):null};
+}
+
+const candidateColumns=`SELECT id,note_id,deck_id,ordinal,queue,due,state,schedule,revision,last_event_id,
+  json_object('due',json_extract(original,'$.due'),'queue',json_extract(original,'$.queue'),
+    'reps',json_extract(original,'$.reps'),'lastReview',json_extract(original,'$.lastReview')) AS original FROM cards`;
+export async function preloadOverviewCandidates(ctx:StudyContext):Promise<void> {
+  ctx.cards=(await ctx.db.prepare(`${candidateColumns} WHERE queue>=0`).all<StoredCard>()).results;
 }
 
 export async function studyCandidates(ctx: StudyContext, selectedId: string, focusIds?: string[]): Promise<{
@@ -306,15 +327,17 @@ export async function studyCandidates(ctx: StudyContext, selectedId: string, foc
   const selected=ctx.decks.find(d=>d.id===selectedId);
   if(!selected)return null;
   const eligibility=scopeOf(ctx.decks,selected).map(id=>({id}));
-  if(!ctx.cards)ctx.cards=(await ctx.db.prepare(`SELECT id,note_id,deck_id,ordinal,queue,due,state,schedule,revision,last_event_id,
-    json_object('due',json_extract(original,'$.due'),'queue',json_extract(original,'$.queue'),
-      'reps',json_extract(original,'$.reps'),'lastReview',json_extract(original,'$.lastReview')) AS original FROM cards WHERE queue>=0`).all<StoredCard>()).results;
+  // Only overview explicitly installs an all-collection cache. A scoped/focused read
+  // must never populate it, or a later parent/sibling would see incomplete candidates.
+  const cards=ctx.cards??(await ctx.db.prepare(`${candidateColumns} WHERE queue>=0
+    AND deck_id IN(SELECT value FROM json_each(?))${focusIds?' AND id IN(SELECT value FROM json_each(?))':''}`)
+    .bind(JSON.stringify(eligibility.map(e=>e.id)),...(focusIds?[JSON.stringify(focusIds)]:[])).all<StoredCard>()).results;
   const byDeck=new Map(eligibility.map(e=>[e.id,e]));
   const nextBoundary=nextStudyDayBoundary(ctx.boundary,ctx.collection.timeZone,ctx.collection.dayStart);
   const focus=focusIds?new Set(focusIds):null;
   const inToday=(c:StoredCard)=>c.queue===0 || ((c.queue===1||c.queue===2||c.queue===3)&&c.due<=ctx.now) ||
     (intradayLearning(c)&&c.due<nextBoundary);
-  const rows={results:ctx.cards.filter(c=>byDeck.has(c.deck_id)&&(!focus||(focus.has(c.id)&&inToday(c))))};
+  const rows={results:cards.filter(c=>byDeck.has(c.deck_id)&&(!focus||(focus.has(c.id)&&inToday(c))))};
   const pending=rows.results.filter(c=>intradayLearning(c)&&c.due<nextBoundary).sort((a,b)=>a.due-b.due||a.id.localeCompare(b.id));
   const eligible=rows.results.filter(c=>{
     if(c.queue===0)return cardAllowance(ctx,selected,c).allowed;
@@ -323,13 +346,11 @@ export async function studyCandidates(ctx: StudyContext, selectedId: string, foc
     const m=activeMember(ctx,c);
     return c.queue===2&&cardAllowance(ctx,selected,c).allowed&&(!m||m.available_at<=ctx.now);
   });
-  if(!ctx.retrievabilities) {
-    ctx.retrievabilities=new Map();
-    for(const deck of ctx.originalDecks) {
-      const backlog=ctx.cards.filter(c=>c.deck_id===deck.id&&activeMember(ctx,c)?.backlog);
-      const values=retrievabilities(backlog.map(c=>parse<ScheduleState>(c.schedule)),ctx.now,schedulerConfig(deck,ctx.collection));
-      backlog.forEach((c,i)=>ctx.retrievabilities!.set(c.id,values[i]));
-    }
+  ctx.retrievabilities??=new Map();
+  for(const deck of ctx.originalDecks) {
+    const backlog=rows.results.filter(c=>c.deck_id===deck.id&&activeMember(ctx,c)?.backlog&&!ctx.retrievabilities!.has(c.id));
+    const values=retrievabilities(backlog.map(c=>parse<ScheduleState>(c.schedule)),ctx.now,schedulerConfig(deck,ctx.collection));
+    backlog.forEach((c,i)=>ctx.retrievabilities!.set(c.id,values[i]));
   }
   const priority=(c:StoredCard)=>c.queue===1||c.queue===3?0:c.queue===0?
     (ctx.restarts.some(r=>!r.paused&&restartContains(ctx,r,c.deck_id))?1:4):activeMember(ctx,c)?.backlog?3:2;

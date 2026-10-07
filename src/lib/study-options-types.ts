@@ -10,6 +10,7 @@ export interface StudyOptionsResponse {
   available: { new: number; review: number }; extra: { new: number; review: number };
   restart: RestartStatus | null;
 }
+export type StudyStatus = Omit<StudyOptionsResponse,'restart'> & { restart: Omit<RestartStatus,'days'> | null };
 export interface RestartPreview {
   token: string; days: { date: string; cards: number }[]; total: number;
   delayedCards: number; maxDelayDays: number;

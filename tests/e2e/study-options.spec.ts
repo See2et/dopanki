@@ -24,7 +24,10 @@ async function setup(page: Page, extraFailure?: 'html-success' | 'html-conflict'
     if (path === '/api/overview') return respond({imported:true,decks:[deck],warnings:[]});
     if (path === '/api/progress') return respond(null);
     if (path === '/api/practice') return respond({sessions:[]});
-    if (path === '/api/study/1') return respond({card:currentCard,counts,answeredToday,nextDue:null});
+    if (path === '/api/study/1') {
+      const {days:_days,...restart}=options.restart??{days:[]};
+      return respond({card:currentCard,counts,answeredToday,nextDue:null,status:{...options,restart:options.restart?restart:null}});
+    }
     if (path === '/api/study-options/1') return respond(options);
     if (path.endsWith('/extra')) {
       extras.push(body);
