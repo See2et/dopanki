@@ -17,6 +17,12 @@ export function restartStatusMarkup(options: StudyOptionsResponse | null): strin
   const done = r.backlogTotal - r.backlogRemaining;
   return `<section class="restart-status" aria-label="再開モードの状況"><div><strong>再開モード${r.paused ? ' · 一時停止中' : ' · 継続中'}</strong><p>たまった復習 ${count(done)} / ${count(r.backlogTotal)}枚完了 · 残り${count(r.backlogRemaining)}枚</p><p>1日の復習目標 ${count(options!.limits.review)}枚 · たまった分は最大${count(r.backlogPerDay + options!.extra.review)}枚${r.paused ? '' : ` · 新規は1日${count(r.dailyNewLimit)}枚`}</p></div><button class="secondary" data-study-options>ペースを確認</button></section>`;
 }
+/** One short line for the study menu: the restart state without the full status box. */
+export function restartSummary(options: StudyOptionsResponse | null): string {
+  const r = options?.restart;
+  if (!r) return '';
+  return `再開モード · ${r.paused ? '一時停止中' : `継続中 · 残り${count(r.backlogRemaining)}枚`}`;
+}
 export function completionOptionsMarkup(options: StudyOptionsResponse | null): string {
   if (!options) return '<p class="study-options-help">今日の目標と残りのカードを確認できます。</p><button class="secondary" data-study-options>今日の学習を調整</button>';
   return `${options.restart && !options.restart.paused && options.restart.backlogRemaining > 0 ? `<p class="study-options-help">たまった復習は残り${count(options.restart.backlogRemaining)}枚です。残りは再開モードの日程に沿って出題します。</p>` : ''}<section class="completion-options" aria-label="今日の学習を追加"><p>今日の目標：新規${count(options.limits.new)}枚 · 復習${count(options.limits.review)}枚</p><p>まだ学習できるカード：新規${count(options.available.new)}枚 · 期限を迎えた復習${count(options.available.review)}枚</p><div class="study-options-actions"><button class="secondary" data-extra="new">新規を追加</button><button class="secondary" data-extra="review">復習を追加</button><button class="secondary" data-study-options>再開ペースを調整</button></div></section>`;

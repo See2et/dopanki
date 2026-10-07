@@ -66,6 +66,12 @@ test('ten-card batch repeats failures, reports results, survives reload/undo and
     await expect(page.getByRole('heading',{name:'3枚の組を終えました'})).toBeVisible();
     await page.getByRole('button',{name:'次の10枚へ'}).click();
     await expect(page.getByText('いま取り組める次の組はありません。')).toBeVisible();
+    // The mode switch moved from the always-visible band into the ⋯ menu.
+    await page.getByRole('button',{name:'学習メニュー'}).click();
+    await expect(page.getByRole('menuitemradio',{name:/10枚ずつ集中/})).toHaveAttribute('aria-checked','true');
+    await page.getByRole('menuitemradio',{name:/連続モード/}).click();
+    await expect(page.locator('.progress-mode')).toHaveText('連続モード');
+    expect(await page.evaluate(()=>localStorage.getItem('dopanki_focus'))).toBe('off');
   } finally { db.sqlite.close(); }
 });
 

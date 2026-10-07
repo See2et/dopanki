@@ -748,6 +748,12 @@ for (const [width,height] of [[1280,900],[390,844]] as const) {
     await startDeck(page,'10');
     await noOverflow(page,width);
     await shot(page,'question');
+    if (width < 400) {
+      // With plans and tools moved off the answering screen, the answer field sits in the upper part of the
+      // first view (it was near 77% of the height before). Soft keyboards and IMEs are not emulated here.
+      const field = await page.locator('#answer-input').boundingBox();
+      expect(field!.y + field!.height).toBeLessThan(height * 0.6);
+    }
     await page.locator('#answer-input').fill('안녕하세요');
     await reveal(page);
     await expect(page.frameLocator('#card-frame').locator('.answer-comparison.is-match')).toBeVisible();
@@ -811,6 +817,9 @@ for (const [width,height] of [[1280,900],[390,844]] as const) {
     await shot(page,'end');
     await page.getByRole('button',{ name: 'もう一度確認' }).click();
     await expect(page.locator('#finale')).not.toHaveClass(/is-celebrating/);
+    // Management and logout stay on home; the study header has only back, undo, sound and ⋯.
+    for (const name of ['ログアウト','教材管理']) await expect(page.getByRole('button',{ name, exact: true })).toHaveCount(0);
+    await page.getByRole('button',{ name: '← デッキ一覧' }).click();
     await page.getByRole('button',{ name: 'ログアウト' }).click();
     await expect(page.locator('#password')).toBeVisible();
     await noOverflow(page,width);

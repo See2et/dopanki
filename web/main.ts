@@ -2,7 +2,7 @@ import './style.css';
 import { api as requestApi, ApiError } from './http';
 import { openManager } from './manager';
 import { openStudyNote } from './study-note';
-import { completionOptionsMarkup, completionTitle, openStudyOptions, restartStatusMarkup, studyOptionsPath } from './study-options';
+import { completionOptionsMarkup, completionTitle, openStudyOptions, restartStatusMarkup, restartSummary, studyOptionsPath } from './study-options';
 import type { StudyOptionsResponse } from '../src/lib/study-options-types';
 import { openPracticeCreator, practiceMarkup, practiceRequestId } from './practice';
 import type { PracticeSession, PracticeStudyResponse } from '../src/lib/practice-types';
@@ -79,6 +79,8 @@ let payoffTimer = 0;
 let rollFrame = 0;
 let undoNote = '';
 let restNote = '';
+/** Last measured card frame height, held while the same card's next document loads. */
+let frameMemory: { card: string; height: string } | null = null;
 /** Self-reported outcome of the review on stage: Again means "didn't remember", 2–4 "remembered". */
 type Verdict = 'recalled' | 'again';
 let verdict: Verdict = 'recalled';
@@ -131,11 +133,13 @@ function countMarkup(d: DeckSummary) {
 const deckPath = (d: DeckSummary) => d.name.replaceAll('::',' / ');
 function soundButton() {
   const on = soundEnabled();
-  return `<button class="sound-toggle" id="sound-toggle" aria-pressed="${on}" title="効果音と自動読み上げ（読み上げボタンはいつでも使えます）"><span class="sound-icon" aria-hidden="true"></span>音 <b>${on ? 'ON' : 'OFF'}</b></button>`;
+  return `<button class="sound-toggle" id="sound-toggle" aria-pressed="${on}" title="効果音と自動読み上げ（読み上げボタンはいつでも使えます）"><span class="sound-glyph" aria-hidden="true"><span class="sound-icon"></span></span><span class="sound-label">音 <b>${on ? 'ON' : 'OFF'}</b></span></button>`;
 }
-function shell(content: string, mode: 'home' | 'study') {
+/** Home keeps the app bar; study replaces it with its own header (`bar`), so management never sits beside recall. */
+function shell(content: string, mode: 'home' | 'study', bar = '') {
   const chip = mode === 'home' && festival.count ? `<span class="bar-dopa" data-dopa-total="${festival.total}" title="ドパは演出用の遊びの点数です"><small>ドパ</small><b>${formatDopa(festival.total)}</b></span>` : '';
-  root.innerHTML = `<header class="app-bar"><div class="app-bar-inner"><button class="brand" id="home" aria-label="デッキ一覧へ">${hamster('calm')}<span>Dopanki</span></button><div class="bar-actions">${chip}${soundButton()}<button class="bar-link" id="open-manager">教材管理</button><a href="/api/export" class="bar-link" title="教材と学習状態をJSONで保存">バックアップ</a>${passwordRequired || accessLogoutUrl ? '<button class="bar-link" id="logout">ログアウト</button>' : ''}</div></div></header><main class="${mode}">${content}</main>`;
+  const header = mode === 'study' ? bar : `<header class="app-bar"><div class="app-bar-inner"><button class="brand" id="home" aria-label="デッキ一覧へ">${hamster('calm')}<span>Dopanki</span></button><div class="bar-actions">${chip}${soundButton()}<button class="bar-link" id="open-manager">教材管理</button><a href="/api/export" class="bar-link" title="教材と学習状態をJSONで保存">バックアップ</a>${passwordRequired || accessLogoutUrl ? '<button class="bar-link" id="logout">ログアウト</button>' : ''}</div></div></header>`;
+  root.innerHTML = `${header}<main class="${mode}">${content}</main>`;
   document.querySelector('#open-manager')?.addEventListener('click', () => {
     if (saving || pending || roundPending || editingNote) return;
     generation++; busy = false; skippedNote = false; noteNotice = ''; answeredCard = null; undoNote = ''; resultNote = null;
@@ -464,17 +468,97 @@ function stageMarkup() {
     ${reward ? `<p class="payoff-amount" style="--fit:${numberFit(amount).toFixed(2)}"><span class="payoff-plus" aria-hidden="true">+</span><span class="payoff-value" data-dopa-amount="${reward.amount}">${amount}</span><span class="payoff-unit">ドパ</span></p>` : '<p class="payoff-saved">回答を保存しました</p>'}
     <div class="payoff-status">${status}</div></section>`;
 }
-function focusMarkup() {
-  if (practiceId) return '';
-  const s = activeFocus();
-  const b = s?.batch;
+/** The session's progress in one quiet line: batch dots (or mode / practice round) and the deck's counts. */
+function progressLine(deck: DeckSummary | undefined) {
+  const practice = practiceState();
+  if (practice) return `<section class="study-progress" aria-label="練習の進み具合"><span class="practice-mode">練習中 · ${practice.round}周目 · ${practice.position} / ${practice.total}枚</span></section>`;
+  const b = activeFocus()?.batch;
   const finished = b ? b.ids.length - b.pending.length : 0;
-  return `<section class="focus-toolbar" aria-label="学習モード"><div>${b ? `<span class="focus-eyebrow">集中モード · ${b.number}組目</span><div class="focus-progress"><strong>${finished}<small> / ${b.ids.length}枚</small></strong><div class="focus-dots" aria-hidden="true">${b.ids.map(id => `<i class="${b.pending.includes(id) ? 'is-pending' : b.excluded.includes(id) ? 'is-excluded' : 'is-done'}"></i>`).join('')}</div></div>` : `<strong>${focusEnabled ? '10枚ずつ集中して学習' : '連続モード'}</strong><p>${focusEnabled ? '覚え直すカードも、同じ組で繰り返します。' : '出題できるカードを続けて学習します。'}</p>`}</div><button class="focus-toggle" id="toggle-focus" aria-pressed="${focusEnabled}" ${busy || pending || editingNote || reward || answeredCard ? 'disabled' : ''}>${focusEnabled ? '連続モードへ' : '10枚ずつ学ぶ'}</button></section>`;
+  const mode = b ? `<span class="progress-mode"><span class="sr-only">集中モード · </span>${b.number}組目</span><div class="focus-progress"><div class="focus-dots" aria-hidden="true">${b.ids.map(id => `<i class="${b.pending.includes(id) ? 'is-pending' : b.excluded.includes(id) ? 'is-excluded' : 'is-done'}"></i>`).join('')}</div><strong>${finished}<small> / ${b.ids.length}枚</small></strong></div>`
+    : `<span class="progress-mode">${focusEnabled ? '集中モード' : '連続モード'}</span>`;
+  const counts = deck && current ? `<span class="study-counts">${(['new','learning','review'] as const).map((kind,i) => `<span class="${kind}"><span aria-hidden="true">${['新','学','復'][i]}</span><span class="sr-only">${['新規','学習','復習'][i]}</span><b>${current!.counts[kind]}</b></span>`).join('')}</span>` : '';
+  return `<section class="study-progress" aria-label="学習の進み具合">${mode}${counts}</section>`;
 }
+const focusBlocked = () => !!(busy || saving || pending || editingNote || reward || answeredCard);
+function setFocusMode(on: boolean) {
+  if (practiceId || focusBlocked() || focusEnabled === on) return;
+  focusEnabled = on;
+  localStorage.setItem('dopanki_focus',focusEnabled ? 'on' : 'off');
+  if (focusEnabled && selected) restoreFocus(selected);
+  void loadCard();
+}
+/**
+ * Occasional tools live one tap away in ⋯: the card's note, the study mode and today's amount/restart pace.
+ * Items keep their existing guards; a blocked item stays listed (aria-disabled) and does nothing.
+ */
+function studyMenuMarkup(cardTools: boolean) {
+  const item = (action: string, label: string, o: { id?: string; disabled?: boolean; sub?: string; checked?: boolean } = {}) =>
+    `<button type="button" class="study-menu-item" role="${o.checked === undefined ? 'menuitem' : 'menuitemradio'}" tabindex="-1" data-menu-action="${action}"${o.id ? ` id="${o.id}"` : ''}${o.checked === undefined ? '' : ` aria-checked="${o.checked}"`}${o.disabled ? ' aria-disabled="true"' : ''}><span>${label}</span>${o.sub ? `<small>${escapeHtml(o.sub)}</small>` : ''}</button>`;
+  const group = (label: string, items: string) => `<div class="study-menu-group" role="group" aria-label="${label}"><p class="study-menu-heading" aria-hidden="true">${label}</p>${items}</div>`;
+  const groups: string[] = [];
+  if (cardTools) groups.push(group('このカード',`${item('edit','ノートを編集',{ id: 'edit-study-note', disabled: !!(busy || pending) })}${item('suspend','出題停止',{ id: 'suspend-study-note', disabled: !!(busy || pending) })}`));
+  if (!practiceId) {
+    const blocked = focusBlocked();
+    groups.push(group('学習モード',`${item('focus-on','10枚ずつ集中',{ checked: focusEnabled, disabled: blocked, sub: '覚え直しも同じ組で繰り返します' })}${item('focus-off','連続モード',{ checked: !focusEnabled, disabled: blocked, sub: '出題できるカードを続けて学習します' })}`));
+    if (selected) groups.push(group('今日の学習',item('options','今日の学習量・再開ペース',{ disabled: !!(busy || saving || pending), sub: restartSummary(studyOptions) })));
+  }
+  if (!groups.length) return '';
+  return `<div class="study-menu"><button type="button" class="study-icon-button" id="study-menu-button" aria-haspopup="menu" aria-expanded="false" aria-controls="study-menu" aria-label="学習メニュー" title="学習メニュー"><span class="menu-dots" aria-hidden="true"></span></button><div class="study-menu-list" id="study-menu" role="menu" aria-label="学習メニュー" hidden>${groups.join('')}</div></div>`;
+}
+/** Study header: back (with ドパハム), deck name, undo, sound and ⋯. It scrolls with the page; nothing is fixed. */
+function studyBar(deckName: string, cardTools: boolean) {
+  return `<header class="study-bar"><div class="study-bar-inner"><button class="study-back" id="back" title="デッキ一覧へ戻る"><span class="study-back-arrow">←</span><span class="sr-only"> デッキ一覧</span><span class="study-back-ham" aria-hidden="true">${hamster('calm')}</span></button><p class="study-deck" title="${escapeHtml(deckName)}"><span>${escapeHtml(deckName)}</span></p><div class="study-bar-actions"><button class="undo-button" id="undo" ${undoDisabled() ? 'disabled' : ''}><span class="undo-icon" aria-hidden="true">↶</span><span class="undo-label">取り消す</span></button>${soundButton()}${studyMenuMarkup(cardTools)}</div></div></header>`;
+}
+function closeStudyMenu(focusButton: boolean) {
+  const menu = document.querySelector<HTMLElement>('#study-menu');
+  if (!menu || menu.hidden) return;
+  menu.hidden = true;
+  const button = document.querySelector<HTMLButtonElement>('#study-menu-button');
+  button?.setAttribute('aria-expanded','false');
+  if (focusButton) button?.focus();
+}
+function bindStudyMenu() {
+  const button = document.querySelector<HTMLButtonElement>('#study-menu-button');
+  const menu = document.querySelector<HTMLElement>('#study-menu');
+  if (!button || !menu) return;
+  const items = () => [...menu.querySelectorAll<HTMLElement>('.study-menu-item')];
+  const open = (last = false) => {
+    menu.hidden = false; button.setAttribute('aria-expanded','true');
+    (last ? items().at(-1) : items()[0])?.focus();
+  };
+  button.addEventListener('click', () => { if (menu.hidden) open(); else closeStudyMenu(true); });
+  button.addEventListener('keydown', event => {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    event.preventDefault(); open(event.key === 'ArrowUp');
+  });
+  menu.addEventListener('keydown', event => {
+    const list = items();
+    const at = list.indexOf(document.activeElement as HTMLElement);
+    const move = (i: number) => { event.preventDefault(); list[(i + list.length) % list.length]?.focus(); };
+    if (event.key === 'ArrowDown') move(at + 1);
+    else if (event.key === 'ArrowUp') move(at - 1);
+    else if (event.key === 'Home') move(0);
+    else if (event.key === 'End') move(list.length - 1);
+    else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeStudyMenu(true); }
+    else if (event.key === 'Tab') closeStudyMenu(false);
+  });
+  menu.addEventListener('click', event => {
+    const chosen = (event.target as Element).closest<HTMLElement>('.study-menu-item');
+    if (!chosen || chosen.getAttribute('aria-disabled') === 'true') return;
+    // Focus returns to ⋯ first, so dialogs opened from here restore focus to a visible control.
+    closeStudyMenu(true);
+    const action = chosen.dataset.menuAction;
+    if (action === 'edit' || action === 'suspend') void manageStudyNote(action);
+    else if (action === 'focus-on' || action === 'focus-off') setFocusMode(action === 'focus-on');
+    else if (action === 'options' && selected && !practiceId) showStudyOptions(selected);
+  });
+}
+// A tap anywhere outside the open menu closes it without moving focus.
+document.addEventListener('pointerdown', event => { if (!(event.target as Element).closest?.('.study-menu')) closeStudyMenu(false); });
 function focusResultMarkup() {
   const b = activeFocus()!.batch;
   const stats = focusStats(b);
-  return `<section class="card-panel focus-result" aria-label="この組のリザルト"><p class="focus-eyebrow">${b.number}組目のリザルト</p><div class="focus-result-mascot" aria-hidden="true">${hamster('cheer')}</div><h1>${b.ids.length}枚の組を終えました</h1><p class="focus-result-lead">${stats.finished ? '今日の学習ステップ、おつかれさまでした。' : 'この組のカードは、ほかの画面で更新されました。'}</p><dl class="focus-result-stats"><div><dt>当日分を完了</dt><dd>${stats.finished}<small>枚</small></dd></div><div><dt>最初に思い出せた</dt><dd>${stats.recalledFirst}<small>枚</small></dd></div><div><dt>覚え直した</dt><dd>${stats.relearned}<small>枚</small></dd></div></dl><p class="focus-result-note">回答 ${stats.answers}回${b.excluded.length ? ` · 対象外・ほかの画面で更新 ${b.excluded.length}枚` : ''}。次の復習はカードごとの予定に沿って出題します。</p><div class="focus-result-actions">${focusExhausted ? '<p class="focus-result-lead">いま取り組める次の組はありません。</p><button class="primary" id="check-next-batch">次の組を確認</button>' : '<button class="primary" id="next-focus">次の10枚へ<span aria-hidden="true"> →</span></button>'}<button class="secondary" id="focus-rest">休憩する</button></div>${focusExhausted ? completionOptionsMarkup(studyOptions) : ''}</section>`;
+  return `<section class="card-panel focus-result" aria-label="この組のリザルト"><p class="focus-eyebrow">${b.number}組目のリザルト</p><div class="focus-result-mascot" aria-hidden="true">${hamster('cheer')}</div><h1>${b.ids.length}枚の組を終えました</h1><p class="focus-result-lead">${stats.finished ? '今日の学習ステップ、おつかれさまでした。' : 'この組のカードは、ほかの画面で更新されました。'}</p><dl class="focus-result-stats"><div><dt>当日分を完了</dt><dd>${stats.finished}<small>枚</small></dd></div><div><dt>最初に思い出せた</dt><dd>${stats.recalledFirst}<small>枚</small></dd></div><div><dt>覚え直した</dt><dd>${stats.relearned}<small>枚</small></dd></div></dl><p class="focus-result-note">回答 ${stats.answers}回${b.excluded.length ? ` · 対象外・ほかの画面で更新 ${b.excluded.length}枚` : ''}。次の復習はカードごとの予定に沿って出題します。</p><div class="focus-result-actions">${focusExhausted ? '<p class="focus-result-lead">いま取り組める次の組はありません。</p><button class="primary" id="check-next-batch">次の組を確認</button>' : '<button class="primary" id="next-focus">次の10枚へ<span aria-hidden="true"> →</span></button>'}<button class="secondary" id="focus-rest">休憩する</button></div><p class="focus-switch-row"><button class="focus-switch" id="focus-continuous">連続モードに切り替える</button></p>${restartStatusMarkup(studyOptions)}${focusExhausted ? completionOptionsMarkup(studyOptions) : ''}</section>`;
 }
 function scheduleLearningRefresh() {
   stopLearningTimer();
@@ -493,37 +577,43 @@ function study() {
   stopLearningTimer();
   const card = current.card;
   const deck = decks.find(d => d.id === selected);
-  const header = `<div class="study-top"><button class="back-link" id="back">← デッキ一覧</button><div class="study-deck"><span>${escapeHtml(practiceState()?.name ?? (deck ? deckPath(deck) : ''))}</span><div class="counts">${practiceState() ? `<span class="practice-mode">練習中 · ${practiceState()!.round}周目 · ${practiceState()!.position} / ${practiceState()!.total}枚</span>` : deck ? countMarkup({ ...deck, counts: current.counts }) : ''}</div></div><button class="undo-button" id="undo" ${undoDisabled() ? 'disabled' : ''}>取り消す</button></div>${focusMarkup()}${undoNote ? `<p class="undo-note" role="status">${escapeHtml(undoNote)}</p>` : resultNote ? `<p class="result-note is-${resultNote.verdict}" role="status">${escapeHtml(resultNote.text)}</p>` : ''}`;
+  // Only the card itself offers its note tools; result, waiting and payoff screens keep the mode and amount items.
+  const cardTools = !!card && !skippedNote && !reward && !answeredCard && activeFocus()?.batch.pending.length !== 0;
+  const bar = studyBar(practiceState()?.name ?? (deck ? deckPath(deck) : ''),cardTools);
+  // Above the stage: progress, transient notes and errors. The stage and the card below it stay one piece.
+  const top = `${progressLine(deck)}${undoNote ? `<p class="undo-note" role="status">${escapeHtml(undoNote)}</p>` : resultNote ? `<p class="result-note is-${resultNote.verdict}" role="status">${escapeHtml(resultNote.text)}</p>` : ''}${noteNotice ? `<p class="undo-note" role="status">${escapeHtml(noteNotice)}</p>` : ''}${statusMarkup()}`;
+  const render = (body: string) => shell(`${top}${body}`,'study',bar);
   if (skippedNote) {
-    shell(`${header}${stageStrip('calm')}${statusMarkup()}<section class="card-panel"><p role="status">${busy ? '次のカードを準備しています…' : '教材の学習状態を確認します。次のカードを読み込んでください。'}</p>${busy ? '' : '<button class="secondary" id="retry-skipped">次のカードを読み込む</button>'}</section>`,'study');
+    render(`${stageStrip('calm')}<section class="card-panel"><p role="status">${busy ? '次のカードを準備しています…' : '教材の学習状態を確認します。次のカードを読み込んでください。'}</p>${busy ? '' : '<button class="secondary" id="retry-skipped">次のカードを読み込む</button>'}</section>`);
     document.querySelector('#retry-skipped')?.addEventListener('click', () => { void loadCard(); study(); });
   } else if (reward || answeredCard) {
-    shell(`${header}${stageStrip(breakTime ? 'cheer' : verdict === 'again' ? 'oops' : 'happy')}${statusMarkup()}${stageMarkup()}`,'study');
+    render(`${stageStrip(breakTime ? 'cheer' : verdict === 'again' ? 'oops' : 'happy')}${stageMarkup()}`);
     document.querySelector('#continue')?.addEventListener('click', continueStudy);
     document.querySelector('#take-break')?.addEventListener('click', () => { primeSound(); void leave(true); });
     document.querySelector('#retry-next')?.addEventListener('click', retryNext);
   } else if (activeFocus()?.batch.pending.length === 0) {
-    shell(`${header}${stageStrip('happy')}${statusMarkup()}${focusResultMarkup()}`,'study');
+    render(`${stageStrip('happy')}${focusResultMarkup()}`);
     document.querySelector('#next-focus')?.addEventListener('click', () => void loadCard(true));
     document.querySelector('#check-next-batch')?.addEventListener('click', () => void loadCard(true));
     document.querySelector('#focus-rest')?.addEventListener('click', () => void leave());
+    document.querySelector('#focus-continuous')?.addEventListener('click', () => setFocusMode(false));
   } else if (!card && !practiceState() && 'learningPending' in current && current.learningPending > 0) {
-    shell(`${header}${stageStrip('calm')}${statusMarkup()}<section class="card-panel learning-wait" aria-label="再学習待ち"><p class="focus-eyebrow">まだ学習の途中です</p><div class="waiting-mascot" aria-hidden="true">${hamster('calm')}</div><h1>覚え直しの時間を待っています</h1><p class="waiting-count">あと <strong>${current.learningPending}</strong> 枚</p><p class="waiting-time">次の学習予定は ${current.nextLearningDue ? formatTime(current.nextLearningDue) : '確認中'}。出題できる時刻になったら自動で再開します。</p><div class="focus-result-actions"><button class="primary" id="check-again">もう一度確認</button><button class="secondary" id="waiting-rest">いったん休憩する</button></div><p class="focus-result-note">この画面を閉じても、カードの復習予定は保存されています。</p></section>`,'study');
+    render(`${stageStrip('calm')}<section class="card-panel learning-wait" aria-label="再学習待ち"><p class="focus-eyebrow">まだ学習の途中です</p><div class="waiting-mascot" aria-hidden="true">${hamster('calm')}</div><h1>覚え直しの時間を待っています</h1><p class="waiting-count">あと <strong>${current.learningPending}</strong> 枚</p><p class="waiting-time">次の学習予定は ${current.nextLearningDue ? formatTime(current.nextLearningDue) : '確認中'}。出題できる時刻になったら自動で再開します。</p><div class="focus-result-actions"><button class="primary" id="check-again">もう一度確認</button><button class="secondary" id="waiting-rest">いったん休憩する</button></div><p class="focus-result-note">この画面を閉じても、カードの復習予定は保存されています。</p></section>`);
     document.querySelector('#waiting-rest')?.addEventListener('click', () => void leave());
     scheduleLearningRefresh();
   } else if (!card && activeFocus()) {
-    shell(`${header}${stageStrip('calm')}${statusMarkup()}<section class="card-panel learning-wait"><p class="focus-eyebrow">この組はまだ途中です</p><h1>いま出題できるカードがありません</h1><p class="waiting-time">残り${activeFocus()!.batch.pending.length}枚は出題上限や再開ペースに沿って出題します。学習量を調整するか、いったん休憩できます。</p><div class="focus-result-actions"><button class="primary" data-study-options>今日の学習量を調整</button><button class="secondary" id="waiting-rest">いったん休憩する</button></div></section>`,'study');
+    render(`${stageStrip('calm')}<section class="card-panel learning-wait"><p class="focus-eyebrow">この組はまだ途中です</p><h1>いま出題できるカードがありません</h1><p class="waiting-time">残り${activeFocus()!.batch.pending.length}枚は出題上限や再開ペースに沿って出題します。学習量を調整するか、いったん休憩できます。</p><div class="focus-result-actions"><button class="primary" data-study-options>今日の学習量を調整</button><button class="secondary" id="waiting-rest">いったん休憩する</button></div></section>`);
     document.querySelector('#waiting-rest')?.addEventListener('click', () => void leave());
   } else if (!card) {
     const celebrate = finale; finale = false;
-    shell(`${header}${practiceState() ? '' : restartStatusMarkup(studyOptions)}${stageStrip(celebrate ? 'cheer' : 'happy')}${statusMarkup()}<section class="card-panel finale${celebrate ? ' is-celebrating' : ''}" id="finale">
+    render(`${stageStrip(celebrate ? 'cheer' : 'happy')}<section class="card-panel finale${celebrate ? ' is-celebrating' : ''}" id="finale">
       ${celebrate ? `<div class="finale-pop" aria-hidden="true">${hamster('wow')}</div>` : ''}
       <p class="finale-title">完了!</p><h1>${practiceState() ? `${practiceState()!.round}周目の練習が完了しました` : completionTitle(studyOptions, current.answeredToday)}</h1>
       <dl class="finale-stats"><div><dt>${practiceState() ? "この周の回答" : "今日の回答"}</dt><dd>${practiceState()?.position ?? current.answeredToday}<small>回</small></dd></div><div><dt>この祭りのドパ</dt><dd>${formatDopa(festival.total)}</dd></div><div><dt>ドパを集めた回数</dt><dd>${festival.count}<small>回</small></dd></div><div><dt>${practiceState() ? 'この周のもう一度' : '次の復習'}</dt><dd class="finale-next">${practiceState() ? `${practiceState()!.againCount}枚` : current.nextDue ? formatTime(current.nextDue) : '次の学習日'}</dd></div></dl>
       ${progressSlot('summary')}${medalStrip(true)}
       <p class="finale-note">どの評価でも同じだけドパが入ります。ドパは記憶の強さを表しません。</p>
-      ${practiceState() ? `<p class="practice-help">練習の回答は、通常の復習予定を変えません。</p><div class="practice-complete-actions"><button class="primary" data-round="all" ${busy || (roundPending && roundPending.mode !== 'all') ? 'disabled' : ''}>全範囲をもう1周</button><button class="secondary" data-round="again" ${busy || !practiceState()!.againCount || (roundPending && roundPending.mode !== 'again') ? 'disabled' : ''}>もう一度のカードだけ（${practiceState()!.againCount}枚）</button></div>` : completionOptionsMarkup(studyOptions)}
-      <div class="finale-actions">${practiceState() ? '' : '<button class="primary" id="check-again">もう一度確認</button>'}<button class="secondary" id="finale-home">デッキ一覧へ</button></div></section>`,'study');
+      ${practiceState() ? `<p class="practice-help">練習の回答は、通常の復習予定を変えません。</p><div class="practice-complete-actions"><button class="primary" data-round="all" ${busy || (roundPending && roundPending.mode !== 'all') ? 'disabled' : ''}>全範囲をもう1周</button><button class="secondary" data-round="again" ${busy || !practiceState()!.againCount || (roundPending && roundPending.mode !== 'again') ? 'disabled' : ''}>もう一度のカードだけ（${practiceState()!.againCount}枚）</button></div>` : `${restartStatusMarkup(studyOptions)}${completionOptionsMarkup(studyOptions)}`}
+      <div class="finale-actions">${practiceState() ? '' : '<button class="primary" id="check-again">もう一度確認</button>'}<button class="secondary" id="finale-home">デッキ一覧へ</button></div></section>`);
     document.querySelector('#finale-home')?.addEventListener('click', () => void leave());
     document.querySelector('#open-medals')?.addEventListener('click', openMedalDialog);
     if (celebrate) {
@@ -540,18 +630,30 @@ function study() {
     const comparison = revealed && front.typedAnswer ? answerComparison(typed,front.typedAnswer.expected,front.typedAnswer.ignoreAccents,inputLang) : '';
     // In the back's own {{type:}} slot when it checks the same answer; otherwise below the card.
     const inSlot = !!comparison && back.typedAnswer?.expected === front.typedAnswer?.expected;
-    shell(`${header}${practiceState() ? '' : restartStatusMarkup(studyOptions)}${stageStrip(revealed ? 'happy' : 'calm')}${statusMarkup()}${noteNotice ? `<p class="undo-note" role="status">${escapeHtml(noteNotice)}</p>` : ''}<div class="study-tools" aria-label="このカードの教材"><button id="edit-study-note"${busy || pending ? ' disabled' : ''}>ノートを編集</button><button id="suspend-study-note"${busy || pending ? ' disabled' : ''}>出題停止</button></div><section class="card-panel review-panel ${revealed ? 'is-answer' : 'is-question'}" id="card-panel">
+    // Same card again (reveal, saving, a saved note): start from its last measured height, so the page
+    // never collapses to the frame's minimum while the new document loads.
+    const keptHeight = frameMemory?.card === card.id ? frameMemory.height : '';
+    render(`${stageStrip(revealed ? 'happy' : 'calm')}<section class="card-panel review-panel ${revealed ? 'is-answer' : 'is-question'}" id="card-panel">
       <div class="card-meta"><span class="phase-pill">${revealed ? '答え' : '問題'}</span><span class="card-state">${['新規','学習中','復習','再学習'][card.schedule.state]}</span><span class="card-deck">${escapeHtml(card.deck.name.split('::').at(-1) || '')}</span></div>
       ${spot ? `<div class="spotlight${revealing ? ' is-revealing' : ''}" id="spotlight"><span class="spotlight-word"${spot.lang ? ` lang="${escapeHtml(spot.lang)}"` : ''}>${graphemes(spot.text).map((g,i) => `<span class="g" style="--i:${i}">${escapeHtml(g)}</span>`).join('')}</span><span class="on-air" aria-hidden="true">♪ 読み上げ中</span></div>` : ''}
       ${rendered.speech.length || rendered.sounds.length ? '<div id="audio" class="audio-controls"></div>' : ''}
       <div class="card-sheet"><iframe id="card-frame" title="${revealed ? '答え' : '問題'}" sandbox="allow-same-origin"></iframe></div>
-      ${!revealed && front.typedAnswer ? `<div class="type-answer"><label for="answer-input">答えを入力 <span>任意</span></label><input id="answer-input"${inputLang ? ` lang="${escapeHtml(inputLang)}"` : ''} autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="思い出した答えを入力…" value="${escapeHtml(typed)}"></div>` : ''}
+      ${!revealed && front.typedAnswer ? `<div class="type-answer"><label class="sr-only" for="answer-input">答えを入力（任意）</label><input id="answer-input"${inputLang ? ` lang="${escapeHtml(inputLang)}"` : ''} autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="done" placeholder="答えを入力（任意）" value="${escapeHtml(typed)}"></div>` : ''}
       ${inSlot ? '' : comparison}
       ${rendered.warnings.length ? `<details class="template-notes"><summary>テンプレートの確認事項</summary><p>${rendered.warnings.map(escapeHtml).join('<br>')}</p></details>` : ''}</section>
-      <div class="review-actions" id="actions">${!revealed ? '<button class="primary reveal" id="reveal">答えを表示<kbd>Space</kbd></button>' : `<div class="ratings" role="group" aria-label="評価（どれを選んでもドパは同じです）">${(['もう一度','難しい','普通','簡単'] as const).map((label,i) => `<button class="rating" data-rating="${i+1}" aria-keyshortcuts="${i+1}" ${busy || (pending && pending.rating !== i+1) ? 'disabled' : ''}><span>${label}</span><strong>${practiceState() ? '' : interval(card.preview[(i+1) as 1|2|3|4].due)}</strong><small aria-hidden="true">${i+1}</small></button>`).join('')}</div><p class="rating-help">${busy ? '回答を保存しています…' : pending ? '保存を確認できませんでした。同じ評価を押して再送できます。' : '思い出せた度合いを、そのまま選んでください。どれを押してもドパは同じです。'}</p>`}</div>`,'study');
+      <div class="review-actions" id="actions">${!revealed ? '<button class="primary reveal" id="reveal">答えを表示<kbd>Space</kbd></button>' : `<div class="ratings" role="group" aria-label="評価（どれを選んでもドパは同じです）">${(['もう一度','難しい','普通','簡単'] as const).map((label,i) => `<button class="rating" data-rating="${i+1}" aria-keyshortcuts="${i+1}" ${busy || (pending && pending.rating !== i+1) ? 'disabled' : ''}><span>${label}</span><strong>${practiceState() ? '' : interval(card.preview[(i+1) as 1|2|3|4].due)}</strong><small aria-hidden="true">${i+1}</small></button>`).join('')}</div>${busy || pending ? `<p class="rating-help">${busy ? '回答を保存しています…' : '保存を確認できませんでした。同じ評価を押して再送できます。'}</p>` : ''}`}</div>`);
     revealing = false;
     const iframe = document.querySelector<HTMLIFrameElement>('#card-frame')!;
-    iframe.addEventListener('load', () => { const height = iframe.contentDocument?.body.scrollHeight ?? 180; iframe.style.height = `${Math.max(150,height+16)}px`; });
+    // The hold sits on the sheet, not the frame: the frame is still measured from its own minimum, as before.
+    const sheet = iframe.parentElement!;
+    if (keptHeight) sheet.style.minHeight = keptHeight;
+    iframe.addEventListener('load', () => {
+      const floor = parseFloat(getComputedStyle(iframe).minHeight) || 150;
+      const height = iframe.contentDocument?.body.scrollHeight ?? 180;
+      iframe.style.height = `${Math.max(floor,height+16)}px`;
+      sheet.style.minHeight = '';
+      frameMemory = { card: card.id, height: iframe.style.height };
+    });
     iframe.srcdoc = frameDocument(rendered,inSlot ? comparison : '');
     document.querySelector<HTMLInputElement>('#answer-input')?.addEventListener('input', e => { typed = (e.target as HTMLInputElement).value; });
     document.querySelector('#reveal')?.addEventListener('click', () => {
@@ -559,24 +661,15 @@ function study() {
       if (soundEnabled()) playAudio(renderCard(card,'back',front!.html));
     });
     document.querySelectorAll<HTMLButtonElement>('[data-rating]').forEach(button => button.addEventListener('click', () => void answer(Number(button.dataset.rating))));
-    document.querySelector('#edit-study-note')?.addEventListener('click', () => void manageStudyNote('edit'));
-    document.querySelector('#suspend-study-note')?.addEventListener('click', () => void manageStudyNote('suspend'));
     audioControls(rendered);
   }
-  bindProgressSlots();
+  bindProgressSlots(); bindStudyMenu();
   if (!practiceState() && selected) {
     document.querySelectorAll('[data-study-options]').forEach(button => button.addEventListener('click', () => showStudyOptions(selected!)));
     document.querySelectorAll<HTMLButtonElement>('[data-extra]').forEach(button => button.addEventListener('click', () => showStudyOptions(selected!, button.dataset.extra as 'new' | 'review')));
   }
   document.querySelector('#back')?.addEventListener('click', () => void leave());
   document.querySelector('#undo')?.addEventListener('click', () => void undo());
-  document.querySelector('#toggle-focus')?.addEventListener('click', () => {
-    if (busy || saving || pending || editingNote || reward || answeredCard) return;
-    focusEnabled = !focusEnabled;
-    localStorage.setItem('dopanki_focus',focusEnabled ? 'on' : 'off');
-    if (focusEnabled && selected) restoreFocus(selected);
-    void loadCard();
-  });
   document.querySelector('#check-again')?.addEventListener('click', () => void loadCard());
   document.querySelectorAll<HTMLButtonElement>('[data-round]').forEach(button => button.addEventListener('click', () => void nextPracticeRound(button.dataset.round as 'all'|'again')));
 }
@@ -587,7 +680,8 @@ async function manageStudyNote(mode: 'edit' | 'suspend') {
   const result = await openStudyNote(card, mode);
   editingNote = false;
   if (result.kind === 'cancel' && !result.uncertain) {
-    document.querySelector<HTMLButtonElement>(mode === 'edit' ? '#edit-study-note' : '#suspend-study-note')?.focus();
+    // The note tools live in the closed ⋯ menu, so focus returns to its button.
+    document.querySelector<HTMLButtonElement>('#study-menu-button')?.focus();
     return;
   }
   if (result.kind === 'saved') {
@@ -601,7 +695,7 @@ async function manageStudyNote(mode: 'edit' | 'suspend') {
         if (ordinal >= 0) card.ordinal = ordinal;
       }
       noteNotice = 'ノートを保存しました。';
-      study(); document.querySelector<HTMLButtonElement>('#edit-study-note')?.focus(); return;
+      study(); document.querySelector<HTMLButtonElement>('#study-menu-button')?.focus(); return;
     }
   }
   // A confirmed suspension (or an unconfirmed write followed by cancellation) must never leave
@@ -723,7 +817,7 @@ function playAudio(rendered: RenderedCard) {
 function audioControls(rendered: RenderedCard) {
   const container = document.querySelector<HTMLDivElement>('#audio'); if (!container) return;
   if (rendered.speech.length) {
-    container.innerHTML = '<button class="audio-button" id="speak">▶ 読み上げる</button><span>端末の音声を使用</span>';
+    container.innerHTML = '<button class="audio-button" id="speak" title="端末の音声で読み上げます">▶ 読み上げる</button>';
     document.querySelector('#speak')?.addEventListener('click', () => speak(rendered));
   }
   for (const sound of rendered.sounds) {
@@ -955,7 +1049,8 @@ document.addEventListener('keydown', e => {
   const target = e.target as HTMLElement;
   const input = !!target.closest('input,textarea,select,[contenteditable=true]');
   // Modal editors and lists own their keys; study shortcuts cannot submit through them.
-  if (recoveringSession || editingNote || document.querySelector('dialog[open]')) return;
+  // The open ⋯ menu owns its keys too: 1–4 or Space there never rate or reveal.
+  if (recoveringSession || editingNote || document.querySelector('dialog[open]') || document.querySelector('#study-menu:not([hidden])')) return;
   if (e.key === 'Escape' && document.querySelector('#medal-toast')) { hideMedalToast(); return; }
   if (!current && e.key === '/' && !input) {
     const search = document.querySelector<HTMLInputElement>('#deck-search');

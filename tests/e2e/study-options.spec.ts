@@ -177,7 +177,11 @@ for (const width of [390,1280]) {
     await page.getByRole('button',{name:'同じ内容で再送'}).click();
     await expect(page.getByRole('dialog')).toHaveCount(0);await expect(page.locator('#reveal')).toBeVisible();
     expect(mock.extras[0].new).toBe(0);expect(mock.extras[0].review).toBe(2);expect(mock.extras[0]).toEqual(mock.extras[1]);
-    await page.getByRole('button',{name:'ペースを確認'}).click();
+    // The answering screen keeps the restart box out of the way; the ⋯ menu reaches the pace in one tap.
+    await expect(page.locator('.restart-status')).toHaveCount(0);
+    await page.getByRole('button',{name:'学習メニュー'}).click();
+    await expect(page.getByRole('menuitem',{name:/今日の学習量・再開ペース/})).toContainText('再開モード · 継続中 · 残り6枚');
+    await page.getByRole('menuitem',{name:/今日の学習量・再開ペース/}).click();
     await expect(page.getByRole('spinbutton',{name:'新規の追加枚数'})).toBeEnabled();
     await page.getByRole('button',{name:'閉じる',exact:true}).click();mock.setCard(false);await page.reload();
     await expect(page.getByRole('heading',{name:'今日の予定は完了です'})).toBeVisible();await expect(page.locator('#finale')).toContainText('残り6枚');await shot(page,`restart-complete-${width}`);

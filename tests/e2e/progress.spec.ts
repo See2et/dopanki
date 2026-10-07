@@ -81,7 +81,7 @@ test('persistent calendar and tomorrow result update on save, undo and reload', 
   await expect(today).toHaveAttribute('data-answers', '1');
   await page.reload();
   await expect(page.locator('.tomorrow-result')).toContainText('1枚減りました');
-  await page.locator('#home').click();
+  await page.getByRole('button', { name: '← デッキ一覧' }).click();
   await expect(page.locator('.calendar-stats')).toContainText('累計の学習日1日');
   await expect(today).toHaveAttribute('data-answers', '1');
 });
