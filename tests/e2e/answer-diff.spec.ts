@@ -142,6 +142,20 @@ test('author markup reusing .expected-answer survives; only the generated slot i
   expect(await card.locator('body').evaluate(body => [...body.children].map(e => e.tagName.toLowerCase()))).toEqual(['hr','section','aside']);
 });
 
+test('a partial Korean sentence highlights changes without striking out shared words', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await open(page,[{ id: 'c5', noteType: types.slot, fields: ['かばんがとても重かったです。','가방이 너무 무거웠어요.','',''] }]);
+  await page.locator('#answer-input').fill('가방을 너무');
+  await page.keyboard.press('Enter');
+  const comparison = frame(page).locator('.answer-comparison');
+  await expect(comparison.locator('.is-input .answer-value')).toHaveText('가방을 너무');
+  await expect(comparison.locator('.is-input del')).toHaveText('을');
+  await expect(comparison.locator('.is-expected ins')).toHaveText(['이',' 무거웠어요.']);
+  await expect(comparison.locator('.is-input .answer-gap')).toHaveCount(1);
+  await noOverflow(page,390);
+  await shot(page,'6-partial-korean');
+});
+
 test('nothing typed keeps the plain answer slot; desktop layout', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await open(page,cards());

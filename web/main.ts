@@ -1,4 +1,5 @@
 import './style.css';
+import { api as requestApi, ApiError } from './http';
 import { openManager } from './manager';
 import { openStudyNote } from './study-note';
 import { completionOptionsMarkup, completionTitle, openStudyOptions, restartStatusMarkup, studyOptionsPath } from './study-options';
@@ -52,6 +53,9 @@ let typed = '';
 let lastEvent: string | null = sessionStorage.getItem('dopanki_undo');
 let pending: { eventId: string; cardId: string; revision: number; rating: number; deckId?: string; focusIds?: string[] } | null = null;
 let imported = false;
+let overviewError = false;
+let authRecovery = false;
+let recoveringSession = false;
 let passwordRequired = false;
 let accessLogoutUrl: string | null = null;
 let warnings: string[] = [];
@@ -92,7 +96,6 @@ try {
 } catch { /* Invalid local preferences do not prevent studying. */ }
 const lastDeckKey = 'dopanki_last_deck';
 const readLastDeck = () => { try { return localStorage.getItem(lastDeckKey); } catch { return null; } };
-class ApiError extends Error { constructor(message: string, public status: number) { super(message); } }
 const reducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
 const stopAudio = () => { window.speechSynthesis?.cancel(); document.querySelectorAll('audio').forEach(audio => audio.pause()); };
 function clearStage() {
@@ -106,10 +109,11 @@ function announce(message: string) {
 }
 
 async function api<T>(path: string, body?: unknown): Promise<T> {
-  const response = await fetch(path, body === undefined ? { cache: 'no-store' } : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  const data = await response.json() as T & { error?: string };
-  if (!response.ok) throw new ApiError(data.error || '通信に失敗しました。',response.status);
-  return data;
+  try { return await requestApi<T>(path,body); }
+  catch (error) {
+    if (path !== '/api/login' && error instanceof ApiError && error.reauthenticate) authRecovery = true;
+    throw error;
+  }
 }
 function formatTime(timestamp: number) {
   return new Intl.DateTimeFormat('ja-JP', { month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(timestamp);
@@ -140,6 +144,7 @@ function shell(content: string, mode: 'home' | 'study') {
   });
   document.querySelector('#home')?.addEventListener('click', () => void leave());
   document.querySelector('#logout')?.addEventListener('click', () => void logout());
+  document.querySelector('#reauthenticate')?.addEventListener('click', () => login('ログインを確認してください。学習中の回答はこの画面に保持しています。',true));
   document.querySelector<HTMLButtonElement>('#sound-toggle')?.addEventListener('click', event => {
     const on = !soundEnabled(); setSoundEnabled(on);
     if (on) primeSound(); else stopAudio();
@@ -174,7 +179,9 @@ async function refreshProgress() {
   }
   paint();
 }
-function statusMarkup() { return errorMessage ? `<div class="error" role="alert">${escapeHtml(errorMessage)}</div>` : ''; }
+function statusMarkup() {
+  return `${errorMessage ? `<div class="error" role="alert">${escapeHtml(errorMessage)}</div>` : ''}${authRecovery || (errorMessage && (passwordRequired || accessLogoutUrl)) ? '<button class="secondary" id="reauthenticate">ログインを確認</button>' : ''}`;
+}
 async function leave(farewell = false) {
   if (saving || pending || roundPending || editingNote) return;
   generation++; busy = false; skippedNote = false; noteNotice = ''; answeredCard = null; undoNote = ''; resultNote = null;
@@ -359,6 +366,11 @@ function renderDeckRows() {
   bindDeckRows();
 }
 function overview() {
+  if (overviewError) {
+    shell(`<section class="home-head"><h1>今日の復習</h1></section>${statusMarkup()}<section class="card-panel"><h2>デッキを読み込めませんでした</h2><p>教材が空かどうかは確認できていません。取り込み直す必要はありません。</p><button class="primary" id="retry-overview">再読み込み</button></section>`,'home');
+    document.querySelector('#retry-overview')?.addEventListener('click', () => void refresh());
+    return;
+  }
   const roots = decks.filter(d => d.parentId === null);
   const sum = (kind: 'new' | 'learning' | 'review') => roots.reduce((n,d) => n + d.counts[kind],0);
   const today = roots.reduce((n,d) => n + d.answeredToday,0);
@@ -375,7 +387,7 @@ function overview() {
         : `<p class="today-hint">${due ? '下のデッキを選ぶと学習が始まります。' : 'いま出題できるカードはありません。'}</p>`}
     </section>`;
   shell(`<section class="home-head"><div><p class="home-date">${date}</p><h1>今日の復習</h1></div>${imported ? medalChip() : ''}</section>
-    ${restNote ? `<p class="rest-note" role="status">${hamster('happy')}<span>${escapeHtml(restNote)}</span></p>` : ''}${statusMarkup()}
+    ${restNote ? `<p class="rest-note" role="status">${hamster('happy')}<span>${escapeHtml(restNote)}</span></p>` : ''}${statusMarkup()}${!current && (selected || practiceId) && errorMessage ? '<button class="secondary" id="retry-study">カードを再読み込み</button>' : ''}
     ${imported ? `${todayPanel}<section class="home-records" aria-label="学習の記録">${progressSlot('home')}</section>
       <section class="deck-panel"><div class="deck-panel-head"><h2>デッキ</h2><label class="deck-search"><span class="sr-only">デッキを検索</span><input id="deck-search" type="search" autocomplete="off" placeholder="デッキを検索" value="${escapeHtml(deckQuery)}"><kbd aria-hidden="true">/</kbd></label></div>
         <div class="deck-tree-heading" aria-hidden="true"><span>名前</span><span class="new">新規</span><span class="learning">学習</span><span class="review">復習</span></div>
@@ -388,6 +400,7 @@ function overview() {
   document.querySelector('#open-medals')?.addEventListener('click', openMedalDialog);
   document.querySelector<HTMLInputElement>('#deck-search')?.addEventListener('input', event => { deckQuery = (event.target as HTMLInputElement).value; renderDeckRows(); });
   document.querySelector('#reload')?.addEventListener('click', () => void refresh());
+  document.querySelector('#retry-study')?.addEventListener('click', () => void loadCard());
 }
 
 /* ---------- Study ---------- */
@@ -770,21 +783,25 @@ async function nextPracticeRound(mode: 'all'|'again') {
     roundPending = null; saving = false; lastEvent = null; stopEffects(); await loadCard();
   } catch (e) {
     saving = false; busy = false;
-    if (e instanceof ApiError && e.status < 500) { roundPending = null; await loadCard(); }
+    if (e instanceof ApiError && e.jsonResponse && e.status >= 400 && e.status < 500 && !e.reauthenticate) { roundPending = null; await loadCard(); }
     errorMessage = roundPending ? '次の周を開始できたか確認できませんでした。同じ周回ボタンを押して再送してください。' : (e as Error).message; study();
   }
 }
 async function refresh() {
+  // Never replace an answer or round whose write has not been confirmed.
+  if (pending || roundPending || saving) return;
   void refreshProgress();
   try {
     const data = await api<{ imported: boolean; decks: DeckSummary[]; warnings: string[] }>('/api/overview');
+    if (!data || typeof data.imported !== 'boolean' || !Array.isArray(data.decks) || !Array.isArray(data.warnings)) throw new Error('デッキ情報を確認できませんでした。もう一度お試しください。');
     decks = data.decks; imported = data.imported; warnings = data.warnings;
+    overviewError = false; errorMessage = '';
     if (imported) void refreshPractices();
     if (practiceId || (selected && decks.some(d => d.id === selected))) await loadCard(); else { selected = null; overview(); }
-  } catch (e) { errorMessage = (e as Error).message; overview(); }
+  } catch (e) { overviewError = true; errorMessage = (e as Error).message; overview(); }
 }
 async function loadCard(nextBatch = false) {
-  if (!selected && !practiceId) return;
+  if (pending || roundPending || (!selected && !practiceId)) return;
   if (nextBatch && busy) return;
   stopLearningTimer();
   // Every queue reload can reflect a suspension, rollover or another screen's updates.
@@ -832,7 +849,7 @@ async function loadCard(nextBatch = false) {
     study();
   } catch (e) {
     if (request !== generation) return;
-    if (practiceId && e instanceof ApiError && e.status === 404) {
+    if (practiceId && e instanceof ApiError && e.jsonResponse && e.status === 404) {
       clearPractice(); selected = null; current = null; pending = null; busy = false;
       stopEffects(); errorMessage = 'このカスタム学習は削除されたか、見つかりません。';
       overview(); void refreshPractices(); return;
@@ -868,7 +885,7 @@ async function answer(rating: number) {
     await loadCard();
   } catch (e) {
     saving = false;
-    if (e instanceof ApiError && (e.status === 409 || (practiceId && e.status === 404))) { pending = null; await loadCard(); }
+    if (e instanceof ApiError && e.jsonResponse && (e.status === 409 || (practiceId && e.status === 404))) { pending = null; await loadCard(); }
     busy = false; errorMessage = (e as Error).message; study();
   }
 }
@@ -895,22 +912,42 @@ async function undo() {
   }
   catch (e) {
     saving = false; busy = false;
-    if (practiceId && e instanceof ApiError && e.status === 404) { await loadCard(); return; }
+    if (practiceId && e instanceof ApiError && e.jsonResponse && e.status === 404) { await loadCard(); return; }
     errorMessage = (e as Error).message; study();
   }
 }
-function login(message = '') {
-  stopEffects();
+async function resumeAuthenticated() {
+  authRecovery = false; recoveringSession = false; errorMessage = '';
+  // Authentication is not permission to replay a write, nor to discard its event ID.
+  // Keep the same card and rating; the learner explicitly resends if needed.
+  if (current) study(); else await refresh();
+}
+function login(message = '', resume = false) {
+  recoveringSession = true;
+  stopAudio(); silenceSound(); stopLearningTimer();
+  if (!resume) stopEffects();
   if (!passwordRequired) {
-    root.innerHTML = `<div class="login-page"><div class="login-card"><h1 class="login-brand">Dopanki</h1><p class="error" role="alert">${escapeHtml(message || '認証を確認できませんでした。もう一度読み込んでください。')}</p><button class="primary" id="reload-session">再読み込み</button></div></div>`;
+    root.innerHTML = `<div class="login-page"><div class="login-card"><h1 class="login-brand">Dopanki</h1><p class="error" role="alert">${escapeHtml(message || '認証を確認できませんでした。もう一度読み込んでください。')}</p>${resume ? '<p>別のタブでログインし、このタブに戻って認証を確認してください。未確認の操作は自動では再送しません。</p><a class="secondary" href="/" target="_blank" rel="noopener">別のタブでログイン</a><button class="primary" id="check-session">認証を確認して戻る</button>' : '<button class="primary" id="reload-session">再読み込み</button>'}</div></div>`;
     document.querySelector('#reload-session')?.addEventListener('click', () => window.location.reload());
+    document.querySelector<HTMLButtonElement>('#check-session')?.addEventListener('click', async event => {
+      (event.currentTarget as HTMLButtonElement).disabled = true;
+      try {
+        const session = await api<{authenticated: boolean}>('/api/session');
+        if (!session.authenticated) throw new Error('ログインが完了していません。別のタブでログインしてください。');
+        await resumeAuthenticated();
+      } catch (error) { login((error as Error).message,true); }
+    });
     return;
   }
   root.innerHTML = `<div class="login-page"><div class="login-card"><div class="login-mascot">${hamster('happy')}</div><h1 class="login-brand">Dopanki</h1><p class="subtle">あなたの教材と、学習の続き。</p><form id="login-form"><label for="password">パスワード</label><input id="password" type="password" autocomplete="current-password" required autofocus><button class="primary" type="submit">ログイン</button><p class="error" role="alert">${escapeHtml(message)}</p></form></div></div>`;
   document.querySelector('#login-form')?.addEventListener('submit', async e => {
     e.preventDefault(); const button = document.querySelector<HTMLButtonElement>('#login-form button')!; button.disabled = true;
-    try { await api('/api/login', { password: document.querySelector<HTMLInputElement>('#password')!.value }); await refresh(); }
-    catch (error) { login((error as Error).message); }
+    try {
+      await api('/api/login', { password: document.querySelector<HTMLInputElement>('#password')!.value });
+      if (resume) await resumeAuthenticated();
+      else { authRecovery = false; recoveringSession = false; await refresh(); }
+    }
+    catch (error) { login((error as Error).message,resume); }
   });
 }
 document.addEventListener('keydown', e => {
@@ -918,7 +955,7 @@ document.addEventListener('keydown', e => {
   const target = e.target as HTMLElement;
   const input = !!target.closest('input,textarea,select,[contenteditable=true]');
   // Modal editors and lists own their keys; study shortcuts cannot submit through them.
-  if (editingNote || document.querySelector('dialog[open]')) return;
+  if (recoveringSession || editingNote || document.querySelector('dialog[open]')) return;
   if (e.key === 'Escape' && document.querySelector('#medal-toast')) { hideMedalToast(); return; }
   if (!current && e.key === '/' && !input) {
     const search = document.querySelector<HTMLInputElement>('#deck-search');

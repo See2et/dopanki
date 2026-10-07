@@ -5,7 +5,7 @@ import { initialSchedule } from '../../src/lib/import';
 import type { StudyOptionsResponse, RestartStatus } from '../../src/lib/study-options-types';
 
 const BASE = process.env.DOPANKI_URL || 'http://127.0.0.1:5173';
-async function setup(page: Page) {
+async function setup(page: Page, extraFailure?: 'html-success' | 'html-conflict' | 'json-conflict') {
   const f = fixture(); const schedule = initialSchedule(f.cards[0], f.decks[0]);
   const counts = {new:0,learning:0,review:0,total:10};
   const deck = {...f.decks[0],parentId:null,depth:0,label:'韓国語',counts,ownCounts:counts,answeredToday:2,ownAnsweredToday:2};
@@ -29,7 +29,13 @@ async function setup(page: Page) {
     if (path.endsWith('/extra')) {
       extras.push(body);
       if (!committedExtras.has(body.requestId)) {options.extra.new += body.new; options.extra.review += body.review; options.limits.new += body.new; options.limits.review += body.review; committedExtras.add(body.requestId); currentCard=card;}
-      if (lostExtra) {lostExtra=false;return route.abort('failed');}
+      if (lostExtra) {
+        lostExtra=false;
+        if (extraFailure === 'html-success') return route.fulfill({status:200,contentType:'text/html',body:'<html>Response unavailable</html>'});
+        if (extraFailure === 'html-conflict') return route.fulfill({status:409,contentType:'text/html',body:'<html>Gateway conflict</html>'});
+        if (extraFailure === 'json-conflict') return respond({message:'Gateway conflict'},409);
+        return route.abort('failed');
+      }
       return respond({ok:true});
     }
     if (path === '/api/review') {reviews.push(body);if (lostReview) {lostReview=false;return route.abort('failed');}currentCard=null;answeredToday++;return respond({ok:true});}
@@ -56,6 +62,61 @@ async function setup(page: Page) {
   await page.goto(BASE);
   return {extras,reviews,states,starts,options,setAnswered:(n:number)=>{answeredToday=n;},setCard:(value:boolean)=>{currentCard=value?card:null;}};
 }
+for (const failure of ['html-success','html-conflict','json-conflict'] as const) {
+  test(`committed extras with an unusable ${failure} response retain their identity after reopening`,async({page})=>{
+    const mock=await setup(page,failure);
+    await page.getByRole('button',{name:'韓国語の学習量を調整'}).click();
+    await page.getByRole('spinbutton',{name:'新規の追加枚数'}).fill('3');
+    await page.getByRole('button',{name:'新規を追加して学習'}).click();
+    await expect(page.getByRole('alert')).toContainText('保存を確認できませんでした');
+    await expect(page.getByRole('spinbutton',{name:'新規の追加枚数'})).toHaveValue('3');
+    await expect(page.getByRole('button',{name:'新規を追加して学習'})).toBeDisabled();
+    expect(mock.options.extra.new).toBe(3);
+    await page.getByRole('button',{name:'閉じる',exact:true}).click();
+    await page.getByRole('button',{name:'韓国語の学習量を調整'}).click();
+    await expect(page.getByRole('spinbutton',{name:'新規の追加枚数'})).toHaveValue('3');
+    await expect(page.getByRole('spinbutton',{name:'新規の追加枚数'})).toBeDisabled();
+    await expect(page.getByRole('button',{name:'同じ内容で再送'})).toBeEnabled();
+    expect(mock.extras).toHaveLength(1);
+    await page.getByRole('button',{name:'同じ内容で再送'}).click();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(page.locator('#reveal')).toBeVisible();
+    expect(mock.extras).toHaveLength(2);
+    expect(mock.extras[1]).toEqual(mock.extras[0]);
+    expect(mock.extras[0]).toMatchObject({requestId:expect.any(String),new:3,review:0});
+    expect(mock.options.extra.new).toBe(3);
+    expect(mock.options.limits.new).toBe(5);
+  });
+}
+
+test('an unresolved committed save can reload a failed reopened dialog without replaying the write',async({page})=>{
+  const mock=await setup(page,'html-success');
+  await page.getByRole('button',{name:'韓国語の学習量を調整'}).click();
+  await page.getByRole('spinbutton',{name:'新規の追加枚数'}).fill('3');
+  await page.getByRole('button',{name:'新規を追加して学習'}).click();
+  await expect(page.getByRole('alert')).toContainText('保存を確認できませんでした');
+  await page.getByRole('button',{name:'閉じる',exact:true}).click();
+  await page.route('**/api/study-options/1',route=>route.abort('failed'));
+  await page.getByRole('button',{name:'韓国語の学習量を調整'}).click();
+  await expect(page.getByRole('dialog')).toContainText('学習状況を読み込めませんでした');
+  const reload=page.getByRole('button',{name:'もう一度読み込む'});
+  await expect(reload).toBeEnabled();
+  expect(mock.extras).toHaveLength(1);
+  await page.unroute('**/api/study-options/1');
+  await reload.click();
+  await expect(page.getByRole('button',{name:'同じ内容で再送'})).toBeEnabled();
+  await expect(page.getByRole('spinbutton',{name:'新規の追加枚数'})).toHaveValue('3');
+  for (const control of await page.locator('[data-content] input, [data-content] button:not([data-retry-save])').all()) await expect(control).toBeDisabled();
+  expect(mock.extras).toHaveLength(1);
+  await page.getByRole('button',{name:'同じ内容で再送'}).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.locator('#reveal')).toBeVisible();
+  expect(mock.extras).toHaveLength(2);
+  expect(mock.extras[1]).toEqual(mock.extras[0]);
+  expect(mock.extras[0]).toMatchObject({requestId:expect.any(String),new:3,review:0});
+  expect(mock.options.extra.new).toBe(3);
+});
+
 async function shot(page: Page, name: string) { await mkdir('.local/verification/study-options',{recursive:true});await page.screenshot({path:`.local/verification/study-options/${name}.png`,fullPage:true}); }
 for (const width of [390,1280]) {
   test(`daily extras and review retries preserve requests and deck scope at ${width}px`,async({page}) => {

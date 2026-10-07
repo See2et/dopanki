@@ -20,8 +20,9 @@ const decks = [
   deck('en', '英語', null, { new: 5, learning: 0, review: 12, total: 300 }),
 ];
 
-async function setup(page: Page, options: { lastDeck?: string; failProgress?: boolean; passwordRequired?: boolean; access?: boolean; width?: number } = {}) {
+async function setup(page: Page, options: { lastDeck?: string; failProgress?: boolean; failOverview?: 'html' | 'transport'; passwordRequired?: boolean; access?: boolean; width?: number } = {}) {
   let failProgress = !!options.failProgress;
+  let failOverview = options.failOverview;
   const days = Array.from({ length: 182 }, (_,i) => {
     const date = new Date(Date.UTC(2026,9,4) - (181-i)*86400000).toISOString().slice(0,10);
     return { date, answers: i === 181 ? 20 : i % 9 === 0 ? 62 : i % 3 === 0 ? 12 : i % 4 === 0 ? 3 : 0 };
@@ -32,7 +33,11 @@ async function setup(page: Page, options: { lastDeck?: string; failProgress?: bo
     const respond = (data: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(data) });
     if (path === '/api/session') return respond({ authenticated: true, passwordRequired: !!options.passwordRequired, ...(options.access ? { logoutUrl: '/cdn-cgi/access/logout' } : {}) });
     if (path === '/api/logout') return respond({ ok: true });
-    if (path === '/api/overview') return respond({ imported: true, warnings: [], decks });
+    if (path === '/api/overview') {
+      if (failOverview === 'html') return route.fulfill({ status: 502, contentType: 'text/html', body: '<html>Bad Gateway</html>' });
+      if (failOverview === 'transport') return route.abort('failed');
+      return respond({ imported: true, warnings: [], decks });
+    }
     if (path === '/api/progress') {
       if (failProgress) return respond({ error: '集計を取得できませんでした' }, 500);
       const progress: ProgressResponse = { today: '2026-10-04', days, todayAnswers: 20, weekStudyDays: 2,
@@ -59,8 +64,86 @@ async function setup(page: Page, options: { lastDeck?: string; failProgress?: bo
   if (options.width) await page.setViewportSize({ width: options.width, height: options.width === 1280 ? 900 : 844 });
   await page.goto(BASE);
   await expect(page.getByRole('heading', { name: '今日の復習' })).toBeVisible();
-  return { failProgress: (value: boolean) => { failProgress = value; } };
+  return {
+    failProgress: (value: boolean) => { failProgress = value; },
+    recoverOverview: () => { failOverview = undefined; },
+  };
 }
+for (const failure of ['html', 'transport'] as const) {
+  test(`an overview ${failure} failure is not an empty collection and retry restores study`, async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', error => errors.push(error.message));
+    const mock = await setup(page, { lastDeck: 'en', failOverview: failure });
+    await expect(page.getByRole('heading', { name: 'デッキを読み込めませんでした' })).toBeVisible();
+    await expect(page.locator('.empty-import')).toHaveCount(0);
+    await expect(page.locator('.today-due')).toHaveCount(0);
+    await expect(page.locator('[role="alert"]')).not.toContainText('JSON');
+    mock.recoverOverview();
+    await page.locator('#retry-overview').click();
+    await expect(page.locator('[role="alert"]')).toHaveCount(0);
+    await expect(page.locator('.resume-name')).toHaveText('英語');
+    await page.locator('[data-resume]').click();
+    await expect(page.locator('#reveal')).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+}
+
+test('a non-JSON conflict does not discard an unconfirmed answer event', async ({ page }) => {
+  await setup(page, { lastDeck: 'en' });
+  const reviews: unknown[] = [];
+  await page.route('**/api/review', async route => {
+    reviews.push(route.request().postDataJSON());
+    if (reviews.length === 1) return route.fulfill({ status: 409, contentType: 'text/html', body: '<html>Proxy error</html>' });
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: true }) });
+  });
+  await page.locator('[data-resume]').click();
+  await page.locator('#reveal').click();
+  await page.locator('[data-rating="3"]').click();
+  await expect(page.locator('.rating-help')).toContainText('同じ評価を押して再送');
+  await expect(page.locator('[data-rating="2"]')).toBeDisabled();
+  expect(reviews).toHaveLength(1);
+  await page.locator('[data-rating="3"]').click();
+  await expect(page.locator('#reveal')).toBeVisible();
+  expect(reviews).toHaveLength(2);
+  expect(reviews[1]).toEqual(reviews[0]);
+});
+
+for (const passwordRequired of [false, true]) {
+  test(`${passwordRequired ? 'password' : 'Access'} reauthentication retains an unconfirmed answer without replaying it`, async ({ page }) => {
+    await setup(page, { lastDeck: 'en', passwordRequired, access: !passwordRequired });
+    const reviews: unknown[] = [];
+    await page.route('**/api/review', async route => {
+      reviews.push(route.request().postDataJSON());
+      if (reviews.length === 1) return route.fulfill({ status: 401, contentType: 'text/html', body: '<html>Login required</html>' });
+      return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: true }) });
+    });
+    await page.route('**/api/login', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ authenticated: true }) }));
+    await page.locator('[data-resume]').click();
+    await page.locator('#reveal').click();
+    await page.locator('[data-rating="3"]').click();
+    await expect(page.locator('.rating-help')).toContainText('同じ評価を押して再送');
+    await expect(page.locator('[data-rating="2"]')).toBeDisabled();
+    await page.locator('#reauthenticate').click();
+    // Keyboard shortcuts must not submit through the authentication screen.
+    await page.keyboard.press('3');
+    if (passwordRequired) {
+      await page.locator('#password').fill('test-password');
+      await page.locator('#login-form button').click();
+    } else {
+      await expect(page.getByRole('link', { name: '別のタブでログイン' })).toHaveAttribute('target', '_blank');
+      await page.locator('#check-session').click();
+    }
+    await expect(page.locator('[data-rating="3"]')).toBeVisible();
+    expect(reviews).toHaveLength(1);
+    await expect(page.locator('.rating-help')).toContainText('同じ評価を押して再送');
+    await page.locator('[data-rating="3"]').click();
+    await expect(page.locator('#reveal')).toBeVisible();
+    expect(reviews).toHaveLength(2);
+    expect(reviews[1]).toEqual(reviews[0]);
+    expect(reviews[0]).toMatchObject({ eventId: expect.any(String), cardId: 'en-card', rating: 3 });
+  });
+}
+
 async function noOverflow(page: Page) {
   const width = page.viewportSize()!.width;
   const scroll = await page.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth));

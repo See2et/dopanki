@@ -34,6 +34,15 @@ describe('typed answer diff', () => {
     expect(typedRow(answerDiff('たべもの','食べ物').ops)).toBe('[-たべもの][+食べ物]');
   });
 
+  it('keeps shared words visible even when most of a sentence is missing', () => {
+    const { ops, matched } = answerDiff('가방을 너무','가방이 너무 무거웠어요.');
+    expect(matched).toBe(false);
+    expect(typedRow(ops)).toBe('가방[-을][+이] 너무[+ 무거웠어요.]');
+    expect(answerComparison('가방을 너무','가방이 너무 무거웠어요.')).toContain('가방<del>을</del> 너무');
+    // Shared text away from either edge must survive unrelated surrounding text too.
+    expect(typedRow(answerDiff('xxx 너무 yyy','zzzzz 너무 wwwww').ops)).toBe('[-xxx][+zzzzz] 너무 [-yyy][+wwwww]');
+  });
+
   it('bounds the work on very long answers', () => {
     const long = 'あ'.repeat(600);
     expect(answerDiff(`x${long}y`,`z${long.replaceAll('あ','い')}w`).ops).toEqual([{ kind: 'extra', input: `x${long}y` },{ kind: 'missing', expected: `z${long.replaceAll('あ','い')}w` }]);

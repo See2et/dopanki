@@ -23,15 +23,26 @@ export function answerDiff(input: string, expected: string, ignoreAccents = fals
   // Imported fields can hold whole sentences: bound the table so a long answer cannot stall the page.
   const rows = n && m && n * m <= 250_000 ? Array.from({ length: n + 1 },() => new Uint32Array(m + 1)) : null;
   if (rows) for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) rows[i][j] = key(x[i]) === key(y[j]) ? rows[i+1][j+1] + 1 : Math.max(rows[i+1][j],rows[i][j+1]);
-  // A few letters shared by chance between two different words read as noise, so show the span as replaced.
-  if (!rows || rows[0][0] * 2 < Math.max(n,m)) { extra(x.join('')); missing(y.join('')); }
+  if (!rows) { extra(x.join('')); missing(y.join('')); }
   else {
-    let i = 0, j = 0;
+    // Low overall similarity must not erase a shared word in a partially typed sentence.
+    // Suppress only isolated coincidences, retaining substantive shared runs as anchors.
+    const sparse = rows[0][0] * 2 < Math.max(n,m);
+    let i = 0, j = 0, changedInput = '', changedExpected = '';
+    const flush = () => { extra(changedInput); missing(changedExpected); changedInput = ''; changedExpected = ''; };
     while (i < n || j < m) {
-      if (i < n && j < m && key(x[i]) === key(y[j])) same(x[i++],y[j++]);
-      else if (i < n && (j === m || rows[i+1][j] >= rows[i][j+1])) extra(x[i++]);
-      else missing(y[j++]);
+      if (i < n && j < m && key(x[i]) === key(y[j])) {
+        const fromI = i, fromJ = j;
+        while (i < n && j < m && key(x[i]) === key(y[j])) { i++; j++; }
+        const inputRun = x.slice(fromI,i).join(''), expectedRun = y.slice(fromJ,j).join('');
+        if (!sparse || x.slice(fromI,i).filter(g => g.trim()).length >= 2) {
+          flush(); same(inputRun,expectedRun);
+        } else { changedInput += inputRun; changedExpected += expectedRun; }
+      }
+      else if (i < n && (j === m || rows[i+1][j] >= rows[i][j+1])) changedInput += x[i++];
+      else changedExpected += y[j++];
     }
+    flush();
   }
   same(a.slice(endA).join(''),b.slice(endB).join(''));
   return { matched, ops };

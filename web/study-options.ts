@@ -1,5 +1,6 @@
 import { escapeHtml } from '../src/lib/render';
 import { practiceRequestId } from './practice';
+import { ApiError } from './http';
 import type { StudyOptionsResponse, RestartPreview } from '../src/lib/study-options-types';
 
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
@@ -49,7 +50,7 @@ export function openStudyOptions(deckId: string, name: string, api: Api, changed
   const setBusy = (value: boolean) => { busy = value; dialog.setAttribute('aria-busy',String(value)); dialog.querySelectorAll<HTMLInputElement | HTMLButtonElement>('input,button').forEach(el => el.disabled = value); if (!value) { content.querySelectorAll<HTMLInputElement | HTMLButtonElement>('[data-disabled]').forEach(el => el.disabled = true); lockUnresolved(); } };
   const lockUnresolved = () => {
     const mutation = unresolved.get(deckId);
-    if (mutation) content.querySelectorAll<HTMLInputElement | HTMLButtonElement>('input,button').forEach(el => { el.disabled = !el.matches('[data-retry-save]'); });
+    if (mutation) content.querySelectorAll<HTMLInputElement | HTMLButtonElement>('input,button').forEach(el => { el.disabled = !el.matches('[data-retry-save],[data-retry-load]'); });
   };
   const save = async (mutation: Mutation) => {
     unresolved.set(deckId,mutation); setBusy(true); error.textContent = ''; let committed = false;
@@ -61,8 +62,10 @@ export function openStudyOptions(deckId: string, name: string, api: Api, changed
       error.textContent = ''; const status = content.querySelector<HTMLElement>('[data-saved]'); if (status) status.textContent = '保存しました。';
     } catch (e) {
       if (committed) { content.innerHTML = '<p>保存しました。最新の学習状況を読み込めませんでした。</p><button class="secondary" data-retry-load>もう一度読み込む</button>'; content.querySelector('[data-retry-load]')!.addEventListener('click',() => void load()); return; }
-      const status = (e as {status?: number}).status;
-      if (status && status < 500) {
+      const status = e instanceof ApiError ? e.status : 0;
+      // Unusable responses do not prove rejection, even when HTTP says 200 or 409.
+      // Retain the original identity until success or an authoritative API rejection.
+      if (e instanceof ApiError && e.jsonResponse && status >= 400 && status < 500 && !e.reauthenticate) {
         unresolved.delete(deckId);
         if (status === 409) { preview = null; try { options = await api<StudyOptionsResponse>(studyOptionsPath(deckId)); } catch { /* Keep current inputs when refreshing fails. */ } }
         render(); error.textContent = status === 409 ? mutation.kind === 'restart' ? '学習状況が変わりました。入力内容を確認し、配分をもう一度確認してください。' : '学習状況が変わりました。最新の状況を確認して、もう一度操作してください。' : (e as Error).message;
