@@ -39,11 +39,11 @@ test('the explicit action adds optional grammar fields and back labels to the un
   await fieldNames(page).nth(1).fill('韓国語回答');
   await page.getByRole('textbox', { name: '表面のHTML' }).fill('{{日本語}}<br>{{type:韓国語回答}}');
   await page.getByRole('textbox', { name: '共通CSS' }).fill('.card { font-size: 28px; color: #233; }');
-  await page.getByRole('button', { name: '品詞・活用ラベルを追加' }).click();
-  await expect(page.locator('#manage-status')).toContainText('「品詞」「変格活用」と裏面のラベルを追加しました');
-  await expect(fieldNames(page)).toHaveCount(4);
+  await page.getByRole('button', { name: '品詞・活用欄を追加' }).click();
+  await expect(page.locator('#manage-status')).toContainText('品詞・変格活用のラベルと活用例欄を整えました');
+  await expect(fieldNames(page)).toHaveCount(5);
   await expect(fieldNames(page).nth(2)).toHaveValue('品詞'); await expect(fieldNames(page).nth(3)).toHaveValue('変格活用');
-  for (const i of [2, 3]) await expect(page.locator('#type-fields .manage-definition').nth(i).getByRole('checkbox', { name: '必須' })).not.toBeChecked();
+  for (const i of [2, 3, 4]) await expect(page.locator('#type-fields .manage-definition').nth(i).getByRole('checkbox', { name: '必須' })).not.toBeChecked();
   await expect(page.getByRole('textbox', { name: 'タイプ名' })).toHaveValue('韓国語（文法つき）');
   await expect(fieldNames(page).nth(1)).toHaveValue('韓国語回答');
   await expect(page.getByRole('textbox', { name: '表面のHTML' })).toHaveValue('{{日本語}}<br>{{type:韓国語回答}}');
@@ -54,6 +54,11 @@ test('the explicit action adds optional grammar fields and back labels to the un
   expect(css.startsWith('.card { font-size: 28px; color: #233; }')).toBe(true); expect(css.match(/dopanki:korean-grammar-labels/g)).toHaveLength(1);
 
   // The renderer preview shows labels on the back only, and keeps typed answer and TTS.
+  await page.getByText('サンプルで表示を確認', { exact: true }).click();
+  await page.getByRole('textbox', { name: '活用例', exact: true }).fill('듣다 + -어요 → 들어요\n듣고 はそのまま。');
+  await page.getByRole('button', { name: 'プレビューを更新' }).click();
+  await expect(backFrame(page).locator('.dpk-conjugation-examples-value')).toHaveText('듣다 + -어요 → 들어요듣고 はそのまま。');
+  await expect(backFrame(page).locator('.dpk-conjugation-examples-value br')).toHaveCount(1);
   await expect(backFrame(page).locator('.dpk-grammar-pos')).toContainText('品詞のサンプル');
   await expect(backFrame(page).locator('.dpk-grammar-conjugation')).toContainText('変格活用のサンプル');
   await expect(page.locator('#type-preview').frameLocator('iframe[title="表のプレビュー"]').locator('.dpk-grammar')).toHaveCount(0);
@@ -64,14 +69,14 @@ test('the explicit action adds optional grammar fields and back labels to the un
   await page.locator('.manage-addon').scrollIntoViewIfNeeded(); await page.screenshot({ path: `${shots}/editor-action-desktop.png` });
   await page.locator('#type-preview').screenshot({ path: `${shots}/editor-preview-desktop.png` });
 
-  await page.getByRole('button', { name: '品詞・活用ラベルを追加' }).click();
+  await page.getByRole('button', { name: '品詞・活用欄を追加' }).click();
   await expect(page.locator('#manage-status')).toContainText('追加済み');
-  await expect(fieldNames(page)).toHaveCount(4);
+  await expect(fieldNames(page)).toHaveCount(5);
   await expect(page.getByRole('textbox', { name: '裏面のHTML' })).toHaveValue(backValue);
 
   await page.getByRole('button', { name: '保存する', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('入力は残っています');
-  await expect(fieldNames(page)).toHaveCount(4); await expect(page.getByRole('textbox', { name: '裏面のHTML' })).toHaveValue(backValue);
+  await expect(fieldNames(page)).toHaveCount(5); await expect(page.getByRole('textbox', { name: '裏面のHTML' })).toHaveValue(backValue);
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.body.scrollWidth)).toBe(390);
   await page.locator('.manage-addon').scrollIntoViewIfNeeded(); await page.screenshot({ path: `${shots}/editor-action-mobile.png` });
@@ -82,7 +87,7 @@ test('the explicit action adds optional grammar fields and back labels to the un
   const saved = bodies[1];
   expect(saved).toMatchObject({ version: 1, name: '韓国語（文法つき）', css });
   expect(saved.fieldDefinitions.slice(0, 2)).toEqual([korean.fieldDefinitions[0], { ...korean.fieldDefinitions[1], name: '韓国語回答' }]);
-  expect(saved.fieldDefinitions.slice(2).map((f: any) => [f.name, f.required])).toEqual([['品詞', false], ['変格活用', false]]);
+  expect(saved.fieldDefinitions.slice(2).map((f: any) => [f.name, f.required])).toEqual([['品詞', false], ['変格活用', false], ['活用例', false]]);
   expect(saved.fieldDefinitions.slice(2).every((f: any) => /^[0-9a-f-]{36}$/.test(f.id))).toBe(true);
   expect(saved.templates).toEqual([{ id: 'template-0', name: '日本語→韓国語', front: '{{日本語}}<br>{{type:韓国語回答}}', back: backValue }]);
   // Same unknown-reference rule as the server: every template token names a field or a built-in.
@@ -94,7 +99,7 @@ test('a validation error leaves the draft unchanged, and cloze types offer no ac
   let patched = false; await manage(page, () => { patched = true; return { body: {} }; });
   await page.getByRole('button', { name: /^項目の多いタイプ/ }).click();
   await page.getByRole('textbox', { name: 'タイプ名' }).fill('編集中の名前');
-  await page.getByRole('button', { name: '品詞・活用ラベルを追加' }).click();
+  await page.getByRole('button', { name: '品詞・活用欄を追加' }).click();
   await expect(page.getByRole('alert')).toContainText('フィールドは32個までです');
   await expect(fieldNames(page)).toHaveCount(31);
   await expect(page.getByRole('textbox', { name: '裏面のHTML' })).toHaveValue(back);
@@ -104,7 +109,7 @@ test('a validation error leaves the draft unchanged, and cloze types offer no ac
   await page.getByRole('button', { name: '一覧へ戻る' }).click(); await page.getByRole('button', { name: '破棄して移動' }).click();
   await page.getByRole('button', { name: /^穴埋め/ }).click();
   await expect(page.getByText('穴埋め式は現在、閲覧のみです。')).toBeVisible();
-  await expect(page.getByRole('button', { name: '品詞・活用ラベルを追加' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '品詞・活用欄を追加' })).toHaveCount(0);
 });
 
 // Study screen rendering of the saved template, using the same helper output as the editor.
@@ -132,9 +137,10 @@ async function study(page: Page, type: typeof labelled | typeof korean, values: 
   return frame;
 }
 const cases = {
-  empty: ['寒い', '춥다', '', ''],
-  populated: ['寒い', '춥다', '形容詞', 'ㅂ変格'],
-  long: ['寒い', '춥다', '形容詞（状態・感覚を表す。用言として活用し、連体形は추운）', 'ㅂ変格活用：語幹末のㅂが母音で始まる語尾の前で우に変わる（춥다→추워요、춥+은→추운）。돕다・곱다は와になる例外'],
+  empty: ['寒い', '춥다', '', '', ''],
+  examplesOnly: ['寒い', '춥다', '', '', '춥다 + -어요 → 추워요\n춥고 はそのまま。'],
+  populated: ['寒い', '춥다', '形容詞', 'ㅂ変格', '춥다 + -어요 → 추워요\n춥다 + -(으)면 → 추우면'],
+  long: ['寒い', '춥다', '形容詞（状態・感覚を表す。用言として活用し、連体形は추운）', 'ㅂ変格活用：語幹末のㅂが母音で始まる語尾の前で우に変わる（춥다→추워요、춥+은→추운）。돕다・곱다は와になる例外', '춥다 + -어요 → 추워요\n춥다 + -(으)면 → 추우면\n춥고 はそのまま。' + '長い補足'.repeat(50)],
 };
 for (const [width, height, device] of [[390, 844, 'mobile'], [1280, 900, 'desktop']] as const) {
   test(`study back shows compact grammar labels on ${device}`, async ({ page }) => {
@@ -147,8 +153,9 @@ for (const [width, height, device] of [[390, 844, 'mobile'], [1280, 900, 'deskto
       const labels = frame.locator('.dpk-grammar');
       if (name === 'empty') {
         await expect(labels).toBeHidden();
+        await expect(frame.locator('.dpk-conjugation-examples')).toHaveCount(0);
         expect(await frame.locator('body').evaluate(b => b.scrollHeight)).toBe(baseHeight);
-      } else {
+      } else if (name !== 'examplesOnly') {
         await expect(frame.locator('.dpk-grammar-pos .dpk-grammar-value')).toHaveText(values[2]);
         await expect(frame.locator('.dpk-grammar-conjugation .dpk-grammar-value')).toHaveText(values[3]);
         const sizes = await frame.locator('.dpk-grammar-pos').evaluate(chip => [chip.querySelector('.dpk-grammar-key')!, chip.querySelector('.dpk-grammar-value')!, document.body].map(e => parseFloat(getComputedStyle(e).fontSize)));
@@ -156,6 +163,16 @@ for (const [width, height, device] of [[390, 844, 'mobile'], [1280, 900, 'deskto
         const overflow = await frame.locator('body').evaluate(b => ({ scroll: b.ownerDocument.documentElement.scrollWidth, client: b.ownerDocument.documentElement.clientWidth, chips: [...b.querySelectorAll('.dpk-grammar-chip')].map(c => c.getBoundingClientRect().right) }));
         expect(overflow.scroll).toBeLessThanOrEqual(overflow.client); for (const right of overflow.chips) expect(right).toBeLessThanOrEqual(overflow.client);
         if (name === 'long') expect(await frame.locator('.dpk-grammar-conjugation').evaluate(c => c.getBoundingClientRect().height)).toBeGreaterThan(40);
+      }
+      if (name !== 'empty') {
+        const example = frame.locator('.dpk-conjugation-examples');
+        await expect(example).toBeVisible();
+        await expect(example.locator('.dpk-conjugation-examples-heading')).toHaveText('活用例');
+        await expect(example.locator('br')).toHaveCount(values[4].split('\n').length - 1);
+        const bounds = await example.evaluate(e => ({ right: e.getBoundingClientRect().right, client: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth, font: getComputedStyle(e).fontSize }));
+        expect(bounds.scroll).toBeLessThanOrEqual(bounds.client);
+        expect(bounds.right).toBeLessThanOrEqual(bounds.client);
+        expect(bounds.font).toBe('16px');
       }
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
       // The rating bar is sticky; scrolling to the end shows the card bottom as a learner sees it.

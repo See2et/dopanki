@@ -7,7 +7,7 @@ import { importStatements } from '../src/lib/import';
 import { app } from '../src/server/index';
 import { fixture } from '../tests/fixture';
 import { TestDb } from '../tests/test-db';
-import { applyKoreanGrammarLabels, grammarLabelCss, referencesField } from './korean-grammar';
+import { applyKoreanGrammarLabels, grammarLabelCss, conjugationExamplesCss, referencesField } from './korean-grammar';
 
 const korean = (): NoteTypeInput => ({
   name: '韓国語',
@@ -30,16 +30,17 @@ const card = (input: NoteTypeInput, values: Record<string,string>, ordinal = 0) 
 const both = (c: StudyCard) => { const front = renderCard(c, 'front'); return { front, back: renderCard(c, 'back', front.html) }; };
 
 describe('Korean grammar labels draft action', () => {
-  it('adds two optional fields, back-only labels per template and CSS once, keeping existing identities', () => {
+  it('adds three optional fields, back-only labels per template and CSS once, keeping existing identities', () => {
     const draft = korean(); const before = structuredClone(draft);
     const { input, changed } = applied(draft);
     expect(changed).toBe(true);
     expect(draft).toEqual(before);
-    expect(input.fieldDefinitions).toEqual([...before.fieldDefinitions, { id: 'new-1', name: '品詞', required: false }, { id: 'new-2', name: '変格活用', required: false }]);
+    expect(input.fieldDefinitions).toEqual([...before.fieldDefinitions, { id: 'new-1', name: '品詞', required: false }, { id: 'new-2', name: '変格活用', required: false }, { id: 'new-3', name: '活用例', required: false }]);
     expect(input.templates.map(t => [t.id, t.name, t.front])).toEqual(before.templates.map(t => [t.id, t.name, t.front]));
     input.templates.forEach((t, i) => { expect(t.back.startsWith(before.templates[i].back)).toBe(true); expect(t.back.match(/class="dpk-grammar"/g)).toHaveLength(1); });
     expect(input.css.startsWith(before.css)).toBe(true);
-    expect(input.css.endsWith(grammarLabelCss)).toBe(true);
+    expect(input.css).toContain(grammarLabelCss);
+    expect(input.css.endsWith(conjugationExamplesCss)).toBe(true);
     expect(input.name).toBe(before.name);
   });
 
@@ -55,8 +56,8 @@ describe('Korean grammar labels draft action', () => {
     draft.templates[0].back += '{{#品詞}}<em class="mine">{{text:品詞}}</em>{{/品詞}}';
     const { input } = applied(draft);
     expect(input.fieldDefinitions.filter(f => f.name === '品詞')).toEqual([{ id: 'pos', name: '品詞', required: true }]);
-    expect(input.fieldDefinitions.at(-1)).toEqual({ id: 'new-1', name: '変格活用', required: false });
-    expect(input.templates[0].back).toBe(`${draft.templates[0].back}<div class="dpk-grammar">{{#変格活用}}<span class="dpk-grammar-chip dpk-grammar-conjugation"><span class="dpk-grammar-key">活用</span><span class="dpk-grammar-value">{{変格活用}}</span></span>{{/変格活用}}</div>`);
+    expect(input.fieldDefinitions.slice(-2)).toEqual([{ id: 'new-1', name: '変格活用', required: false }, { id: 'new-2', name: '活用例', required: false }]);
+    expect(input.templates[0].back.startsWith(`${draft.templates[0].back}<div class="dpk-grammar">{{#変格活用}}<span class="dpk-grammar-chip dpk-grammar-conjugation"><span class="dpk-grammar-key">活用</span><span class="dpk-grammar-value">{{変格活用}}</span></span>{{/変格活用}}</div>`)).toBe(true);
     expect(input.templates[1].back.match(/dpk-grammar-chip/g)).toHaveLength(2);
     expect(referencesField('{{ #品詞 }}', '品詞')).toBe(true);
     expect(referencesField('{{品詞の例}}', '品詞')).toBe(false);
@@ -73,10 +74,36 @@ describe('Korean grammar labels draft action', () => {
     expect(applyKoreanGrammarLabels(input, ids, saved)).toMatchObject({ ok: true, changed: false });
   });
 
-  it('adds no CSS when every back already shows both fields', () => {
-    const draft = korean(); draft.fieldDefinitions.push({ id: 'a', name: '品詞', required: false }, { id: 'b', name: '変格活用', required: false });
-    draft.templates.forEach(t => { t.back += '{{品詞}}{{変格活用}}'; });
+  it('adds no CSS when every back already shows all three fields', () => {
+    const draft = korean(); draft.fieldDefinitions.push({ id: 'a', name: '品詞', required: false }, { id: 'b', name: '変格活用', required: false }, { id: 'c', name: '活用例', required: false });
+    draft.templates.forEach(t => { t.back += '{{品詞}}{{変格活用}}{{活用例}}'; });
     expect(applyKoreanGrammarLabels(draft, ids)).toEqual({ ok: true, input: draft, changed: false });
+  });
+
+  it('upgrades old labelled types without replacing CSS, and preserves custom example references', () => {
+    const legacy = applied(korean()).input;
+    legacy.fieldDefinitions.pop();
+    legacy.templates.forEach(t => { t.back = t.back.replace(/{{#活用例}}[\s\S]*?{{\/活用例}}/, ''); });
+    legacy.css = legacy.css.slice(0, legacy.css.indexOf('/* dopanki:korean-conjugation-examples */')).trimEnd();
+    const upgraded = applied(legacy).input;
+    expect(upgraded.fieldDefinitions.slice(0, -1)).toEqual(legacy.fieldDefinitions);
+    expect(upgraded.css.startsWith(legacy.css)).toBe(true);
+    expect(upgraded.css).toContain(conjugationExamplesCss);
+    upgraded.templates.forEach((t, i) => {
+      expect(t.back.startsWith(legacy.templates[i].back)).toBe(true);
+      expect(t.back.match(/class="dpk-conjugation-examples"/g)).toHaveLength(1);
+    });
+    expect(applied(upgraded).changed).toBe(false);
+    const custom = korean();
+    custom.fieldDefinitions.push({ id: 'example', name: '活用例', required: false });
+    custom.templates[0].back += '{{#活用例}}<aside>{{text:活用例}}</aside>{{/活用例}}';
+    const result = applied(custom).input;
+    expect(result.fieldDefinitions.find(f => f.name === '活用例')?.id).toBe('example');
+    expect(result.templates[0].back).not.toContain('dpk-conjugation-examples');
+    const shown = both(card(result, { 日本語: '聞く', 韓国語: '듣다', 活用例: '듣다 + -어요 → 들어요\n듣고 <そのまま>' }, 1));
+    expect(shown.front.html).not.toContain('들어요');
+    expect(shown.back.html).toContain('듣다 + -어요 → 들어요<br>듣고 &lt;そのまま&gt;');
+    expect(shown.back.html).toContain('dpk-conjugation-examples-heading">活用例');
   });
 
   it('refuses field, back and CSS limit violations without changing the draft', () => {
@@ -85,7 +112,7 @@ describe('Korean grammar labels draft action', () => {
     const error = applyKoreanGrammarLabels(many, ids);
     expect(error.ok).toBe(false); expect(error.ok ? '' : error.error).toContain('32');
     expect(many).toEqual(snapshot);
-    many.fieldDefinitions.pop();
+    many.fieldDefinitions.splice(-2);
     expect(applied(many).input.fieldDefinitions).toHaveLength(32);
 
     const longBack = korean(); longBack.templates[1].back += 'x'.repeat(29800);
@@ -104,7 +131,7 @@ describe('Korean grammar labels draft action', () => {
   it('renders compact labels on the back only, with an empty wrapper and unchanged typed answer and TTS when blank', () => {
     const draft = korean(); const { input } = applied(draft);
     const values = { 日本語: '寒い', 韓国語: '춥다' };
-    const original = both(card(draft, values)); const blank = both(card(input, values)); const spaces = both(card(input, { ...values, 品詞: '  ', 変格活用: '\n' }));
+    const original = both(card(draft, values)); const blank = both(card(input, values)); const spaces = both(card(input, { ...values, 品詞: '  ', 変格活用: '\n', 活用例: ' \n ' }));
     expect(blank.front).toEqual({ ...original.front, css: input.css });
     expect(blank.back.html).toBe(`${original.back.html}<div class="dpk-grammar"></div>`);
     expect(spaces.back.html).toBe(blank.back.html);
@@ -144,16 +171,22 @@ describe('saving the draft through the management API', () => {
     const response = await request('/note-types/1', { ...input, version: noteType.version, requestId: 'korean-grammar-labels-test-1' }, 'PATCH');
     expect(response.status).toBe(200);
     const { noteType: saved } = await response.json() as any;
-    expect(saved.fieldDefinitions.map((f: any) => [f.id, f.name])).toEqual([...noteType.fieldDefinitions.map((f: any, i: number) => [f.id, i === 1 ? '韓国語' : f.name]), ['new-1', '品詞'], ['new-2', '変格活用']]);
+    expect(saved.fieldDefinitions.map((f: any) => [f.id, f.name])).toEqual([...noteType.fieldDefinitions.map((f: any, i: number) => [f.id, i === 1 ? '韓国語' : f.name]), ['new-1', '品詞'], ['new-2', '変格活用'], ['new-3', '活用例']]);
     expect(saved.templates.map((t: any) => [t.id, t.front])).toEqual(noteType.templates.map((t: any) => [t.id, t.front.replace('{{type:KR}}', '{{type:韓国語}}')]));
     expect(saved.templates[0].back.startsWith('{{JP}}<hr>{{tts ko_KR voices=AwesomeTTS:韓国語}}{{type:韓国語}}<div class="dpk-grammar">')).toBe(true);
     expect({ cards: rows('cards'), imported: rows('imported_reviews'), events: rows('review_events') }).toEqual(before);
     const { note } = await (await request('/notes/1')).json() as any;
-    expect(note.fields).toEqual({ JP: 'こんにちは', 韓国語: '안녕하세요', 品詞: '', 変格活用: '' });
+    expect(note.fields).toEqual({ JP: 'こんにちは', 韓国語: '안녕하세요', 品詞: '', 変格活用: '', 活用例: '' });
     const { back } = both(card(saved, note.fields));
     expect(back.typedAnswer).toEqual({ expected: '안녕하세요', ignoreAccents: false });
     expect(back.speech.map(s => [s.text, s.lang])).toEqual([['안녕하세요', 'ko-KR']]);
     expect(back.warnings).toEqual([]);
+    const examples = '듣다 + -어요 → 들어요\n듣고 はそのまま。';
+    const updated = await request('/notes/1', { version: note.version, requestId: 'korean-example-note-edit', fields: { 活用例: examples } }, 'PATCH');
+    expect(updated.status).toBe(200);
+    const { note: edited } = await (await request('/notes/1')).json() as any;
+    expect(edited.fields).toEqual({ ...note.fields, 活用例: examples });
+    expect({ cards: rows('cards'), imported: rows('imported_reviews'), events: rows('review_events') }).toEqual(before);
     expect(applyKoreanGrammarLabels(saved, ids, saved)).toMatchObject({ ok: true, changed: false });
   });
 });

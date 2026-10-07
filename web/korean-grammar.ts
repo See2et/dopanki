@@ -7,7 +7,14 @@ export const grammarFields = [
 ] as const;
 // Mirrors the management API limits, so the editor can refuse before touching the draft.
 export const grammarLimits = { fields: 32, back: 30000, css: 40000 };
+const exampleField = '活用例';
 const cssMarker = '/* dopanki:korean-grammar-labels */';
+const examplesCssMarker = '/* dopanki:korean-conjugation-examples */';
+export const conjugationExamplesCss = `${examplesCssMarker}
+.dpk-conjugation-examples{box-sizing:border-box;max-width:100%;margin:1rem 0 0;padding:.75rem 1rem;border-left:3px solid #e6cf9d;border-radius:.25rem;background:#fdfaf3;color:#443b2c;font-size:1rem;line-height:1.7;text-align:start;overflow-wrap:anywhere}
+.dpk-conjugation-examples-heading{margin:0 0 .35rem;color:#85581a;font-size:.75rem;font-weight:700}
+.dpk-conjugation-examples-value{min-width:0}`;
+const examplesBlock = `{{#活用例}}<div class="dpk-conjugation-examples"><div class="dpk-conjugation-examples-heading">活用例</div><div class="dpk-conjugation-examples-value">{{活用例}}</div></div>{{/活用例}}`;
 
 /**
  * Back-only labels. Values use rem so they stay small regardless of the card's own font size,
@@ -46,7 +53,7 @@ export type GrammarApplyResult =
   | { ok: false; error: string };
 
 /**
- * Returns a new draft with the optional fields, back labels and CSS added once.
+ * Returns a new draft with optional grammar fields, back labels, examples and CSS added once.
  * Existing fields, templates, IDs and custom references are kept; only what is missing is added.
  * On a validation error the given draft is returned untouched via `ok:false`.
  * `saved` is the stored type: the server migrates renamed references only in unchanged sides,
@@ -56,18 +63,22 @@ export function applyKoreanGrammarLabels(draft: NoteTypeInput, newId: () => stri
   const input = structuredClone(draft);
   // Destination names use the server's trimmed form; the draft's own field names stay as typed.
   const renames = new Map(saved?.fieldDefinitions.flatMap(f => { const name = input.fieldDefinitions.find(n => n.id === f.id)?.name.trim(); return name !== undefined && name !== f.name ? [[f.name, name] as const] : []; }));
-  for (const field of grammarFields) if (!input.fieldDefinitions.some(f => f.name === field.name)) input.fieldDefinitions.push({ id: newId(), name: field.name, required: false });
-  if (input.fieldDefinitions.length > grammarLimits.fields) return { ok: false, error: `フィールドは${grammarLimits.fields}個までです。品詞・変格活用を追加するには、${input.fieldDefinitions.length - grammarLimits.fields}個減らしてください。` };
+  for (const name of [...grammarFields.map(f => f.name), exampleField]) if (!input.fieldDefinitions.some(f => f.name.trim() === name)) input.fieldDefinitions.push({ id: newId(), name, required: false });
+  if (input.fieldDefinitions.length > grammarLimits.fields) return { ok: false, error: `フィールドは${grammarLimits.fields}個までです。品詞・変格活用・活用例を追加するには、${input.fieldDefinitions.length - grammarLimits.fields}個減らしてください。` };
   for (const [i, template] of input.templates.entries()) {
     const back = saved?.templates.find(t => t.id === template.id)?.back === template.back ? renameRefs(template.back, renames) : template.back;
     const missing = grammarFields.filter(field => !referencesField(back, field.name));
-    if (!missing.length) continue;
-    template.back = `${back}<div class="dpk-grammar">${missing.map(chip).join('')}</div>`;
-    if (template.back.length > grammarLimits.back) return { ok: false, error: `カード ${i + 1} の裏面が${grammarLimits.back.toLocaleString('ja-JP')}文字を超えるため、ラベルを追加できません。` };
+    const missingExamples = !referencesField(back, exampleField);
+    if (!missing.length && !missingExamples) continue;
+    template.back = `${back}${missing.length ? `<div class="dpk-grammar">${missing.map(chip).join('')}</div>` : ''}${missingExamples ? examplesBlock : ''}`;
+    if (template.back.length > grammarLimits.back) return { ok: false, error: `カード ${i + 1} の裏面が${grammarLimits.back.toLocaleString('ja-JP')}文字を超えるため、活用欄を追加できません。` };
   }
   if (input.templates.some(t => t.back.includes('dpk-grammar-chip')) && !input.css.includes(cssMarker)) {
     input.css = input.css.trimEnd() ? `${input.css.trimEnd()}\n\n${grammarLabelCss}` : grammarLabelCss;
-    if (input.css.length > grammarLimits.css) return { ok: false, error: `共通CSSが${grammarLimits.css.toLocaleString('ja-JP')}文字を超えるため、ラベルを追加できません。` };
   }
+  if (input.templates.some(t => t.back.includes('dpk-conjugation-examples')) && !input.css.includes(examplesCssMarker)) {
+    input.css = input.css.trimEnd() ? `${input.css.trimEnd()}\n\n${conjugationExamplesCss}` : conjugationExamplesCss;
+  }
+  if (input.css.length > grammarLimits.css) return { ok: false, error: `共通CSSが${grammarLimits.css.toLocaleString('ja-JP')}文字を超えるため、活用欄を追加できません。` };
   return { ok: true, input, changed: JSON.stringify(input) !== JSON.stringify(draft) };
 }
