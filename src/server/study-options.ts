@@ -36,6 +36,7 @@ export interface StudyContext {
   collection: ImportDocument['collection']; decks: DeckSummary[]; originalDecks: Deck[];
   totals: DeckTotals[]; answers: DeckAnswers[]; extras: ExtraRow[]; restarts: RestartRow[]; members: Member[];
   restartUsage: {id:string;cards:number}[]; creditEvents:CreditEvent[]; cards?:StoredCard[]; retrievabilities?:Map<string,number>; memberIndex?:Map<string,Member>; activeMemberCache?:Map<string,Member|undefined>;
+  capCache?:Map<string,Map<string,Cap[]>>; restartCache?:Map<string,RestartRow|undefined>;
 }
 const parse = <T>(value: string): T => JSON.parse(value) as T;
 const requestId = (v: unknown): v is string => typeof v === 'string' && /^[a-zA-Z0-9-]{16,80}$/.test(v);
@@ -122,16 +123,29 @@ function restartExtra(ctx:StudyContext,restart:RestartRow,category:'new'|'review
   }).reduce((n,e)=>n+(category==='new'?e.new_extra:e.review_extra),0);
 }
 interface Cap { scope:string[]; new:number; review:number }
+/** Context is a request-local snapshot; quota reservations remain live outside these caches. */
+function activeRestart(ctx:StudyContext,deckId:string):RestartRow|undefined {
+  ctx.restartCache??=new Map();
+  if(!ctx.restartCache.has(deckId))ctx.restartCache.set(deckId,ctx.restarts.find(r=>!r.paused&&restartContains(ctx,r,deckId)));
+  return ctx.restartCache.get(deckId);
+}
 /** Ordinary caps come only from the selected path. Grants are a separate shared credit ledger. */
 function capsFor(ctx:StudyContext,selected:DeckSummary,actual:DeckSummary):Cap[] {
-  const active=ctx.restarts.find(r=>!r.paused&&restartContains(ctx,r,actual.id));
-  return ctx.decks.filter(d=>(d.name===actual.name||actual.name.startsWith(d.name+'::'))&&
+  ctx.capCache??=new Map();
+  let selectedCaps=ctx.capCache.get(selected.id);
+  if(!selectedCaps){selectedCaps=new Map();ctx.capCache.set(selected.id,selectedCaps);}
+  const cached=selectedCaps.get(actual.id);
+  if(cached)return cached;
+  const active=activeRestart(ctx,actual.id);
+  const caps=ctx.decks.filter(d=>(d.name===actual.name||actual.name.startsWith(d.name+'::'))&&
     (d.name===selected.name||d.name.startsWith(selected.name+'::'))&&
     (!active||!(active.deck_id===d.id||inScope(active.scope,d.id)))).map(d=>{
     const original=ctx.originalDecks.find(original=>original.id===d.id);
     return {scope:scopeOf(ctx.decks,d),new:original?.config.newPerDay??Number.MAX_SAFE_INTEGER,
       review:original?(original.config.reviewPerDay??9999):Number.MAX_SAFE_INTEGER};
   });
+  selectedCaps.set(actual.id,caps);
+  return caps;
 }
 function used(ctx: StudyContext, scope: string[], category: 'new'|'review'): number {
   return ctx.answers.filter(a=>scope.includes(a.deck_id)).reduce((n,a)=>n+(a[category]??0),0);
@@ -172,7 +186,7 @@ function cardAllowance(ctx:StudyContext,selected:DeckSummary,card:StoredCard,res
   const caps=capsFor(ctx,selected,actual);
   if(card.state!==0&&card.state!==2)return {allowed:true,caps};
   const category=card.state===0?'new':'review';
-  const restart=ctx.restarts.find(r=>!r.paused&&restartContains(ctx,r,card.deck_id));
+  const restart=activeRestart(ctx,card.deck_id);
   const normalRoom=caps.every(cap=>baseUsed(ctx,cap.scope,category)+(reserved?.base.get(capKey(cap,category))??0)<cap[category]);
   const member=activeMember(ctx,card);
   const backlogCredits=restart?ctx.creditEvents.filter(e=>e.restart_id===restart.id&&e.backlog).length:0;
@@ -349,11 +363,12 @@ export async function studyCandidates(ctx: StudyContext, selectedId: string, foc
   ctx.retrievabilities??=new Map();
   for(const deck of ctx.originalDecks) {
     const backlog=rows.results.filter(c=>c.deck_id===deck.id&&activeMember(ctx,c)?.backlog&&!ctx.retrievabilities!.has(c.id));
+    if(!backlog.length)continue;
     const values=retrievabilities(backlog.map(c=>parse<ScheduleState>(c.schedule)),ctx.now,schedulerConfig(deck,ctx.collection));
     backlog.forEach((c,i)=>ctx.retrievabilities!.set(c.id,values[i]));
   }
   const priority=(c:StoredCard)=>c.queue===1||c.queue===3?0:c.queue===0?
-    (ctx.restarts.some(r=>!r.paused&&restartContains(ctx,r,c.deck_id))?1:4):activeMember(ctx,c)?.backlog?3:2;
+    (activeRestart(ctx,c.deck_id)?1:4):activeMember(ctx,c)?.backlog?3:2;
   eligible.sort((a,b)=>{
     const diff=priority(a)-priority(b);
     if(diff)return diff;

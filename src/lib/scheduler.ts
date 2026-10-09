@@ -165,12 +165,20 @@ export function reconstructMemory(input: MemoryReconstructionInput, config: Sche
   return { stability, difficulty: Math.max(1, Math.min(10, difficulty)), source: 'sm2' };
 }
 
+// Intl construction is expensive on Workers' CPU budget. Reuse immutable formatters
+// across calendar/scheduling calls, with a cap for user-supplied timezone names.
+const formatters = new Map<string, Intl.DateTimeFormat>();
 function formatter(timeZone: string): Intl.DateTimeFormat {
   if (typeof timeZone !== 'string' || !timeZone.trim()) throw new Error('Missing time zone');
-  return new Intl.DateTimeFormat('en-GB', {
+  const cached = formatters.get(timeZone);
+  if (cached) return cached;
+  const format = new Intl.DateTimeFormat('en-GB', {
     timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
   });
+  if (formatters.size >= 32) formatters.delete(formatters.keys().next().value!);
+  formatters.set(timeZone, format);
+  return format;
 }
 
 function wallTime(timestamp: number, format: Intl.DateTimeFormat): number {

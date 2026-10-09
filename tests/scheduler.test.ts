@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { defaultConfig, nextStudyDayBoundary, preview, reconstructMemory, schedule, studyDayBoundary, validateConfig, type ScheduleState, type SchedulerConfig } from '../src/lib/scheduler';
+import { describe, expect, it, vi } from 'vitest';
+import { defaultConfig, nextStudyDayBoundary, preview, reconstructMemory, schedule, studyDate, studyDayBoundary, validateConfig, type ScheduleState, type SchedulerConfig } from '../src/lib/scheduler';
 
 const minute = 60_000;
 const now = Date.parse('2026-10-03T12:00:00Z');
@@ -181,6 +181,25 @@ describe('study-day calendar', () => {
       .toBe(Date.parse('2026-03-08T07:00:00Z')); // nonexistent 02:00 becomes 03:00 EDT
     expect(schedule(card(), 4, Date.parse('2026-10-31T16:00:00Z'), { ...dstConfig, dayStart: 1 }).due)
       .toBe(Date.parse('2026-11-01T05:00:00Z')); // first 01:00, EDT
+  });
+});
+
+describe('calendar CPU resource regression', () => {
+  it('reuses timezone formatters for large restart calendars without mixing zones or accepting invalid settings', () => {
+    const constructors = vi.spyOn(Intl, 'DateTimeFormat');
+    try {
+      // Production restart calendars have ~1,000 members. Bound expensive Intl
+      // construction rather than wall-clock duration, which varies across hosts.
+      for (let i = 0; i < 1000; i++) {
+        expect(studyDate(now, 'Pacific/Chatham', 4)).toBe('2026-10-03');
+        expect(studyDate(now, 'Pacific/Honolulu', 4)).toBe('2026-10-02');
+      }
+      expect(constructors.mock.calls.length).toBeLessThanOrEqual(2);
+      expect(() => validateConfig(config({ timeZone: 'Invalid/Timezone' }))).toThrow();
+      expect(studyDate(now, 'Pacific/Chatham', 4)).toBe('2026-10-03');
+    } finally {
+      constructors.mockRestore();
+    }
   });
 });
 
