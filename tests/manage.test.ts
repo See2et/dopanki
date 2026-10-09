@@ -13,7 +13,7 @@ async function req(path:string,body?:unknown,method=body===undefined?'GET':'POST
 }
 const manage=(path:string,body?:Record<string,unknown>,method?:string,headers?:Record<string,string>)=>req('/api/manage'+path,body===undefined?undefined:{requestId:key(),...body},method,headers);
 const definition={name:'言語',fieldDefinitions:[{id:'prompt',name:'問題',required:true},{id:'answer',name:'答え',required:true},{id:'hint',name:'補足',required:false}],templates:[{id:'forward',name:'順方向',front:'{{問題}}',back:'{{FrontSide}}<hr>{{答え}}{{#補足}}<aside>{{補足}}</aside>{{/補足}}'}],css:'.card {font-size:24px}'};
-beforeEach(()=>{db=new TestDb();for(const f of ['0001_initial.sql','0002_history_time.sql','0003_authoring.sql','0004_custom_practice.sql','0005_practice_deletion.sql','0006_study_options.sql','0007_restart_new_limit.sql','0008_read_reduction.sql'])db.sqlite.exec(readFileSync(`migrations/${f}`,'utf8'));db.sqlite.exec(importStatements(fixture()).join(';')+';');});
+beforeEach(()=>{db=new TestDb();for(const f of ['0001_initial.sql','0002_history_time.sql','0003_authoring.sql','0004_custom_practice.sql','0005_practice_deletion.sql','0006_study_options.sql','0007_restart_new_limit.sql','0008_read_reduction.sql','0009_note_card_index.sql'])db.sqlite.exec(readFileSync(`migrations/${f}`,'utf8'));db.sqlite.exec(importStatements(fixture()).join(';')+';');});
 afterEach(()=>db.sqlite.close());
 describe('authoring through the shared API',()=>{
  it.each(['field','template'])('guards %s removal against concurrent first-note creation',async(kind)=>{
@@ -114,6 +114,71 @@ describe('authoring through the shared API',()=>{
   const first=await (await manage('/notes/bulk',bulk)).json() as any;expect(first.results.map((r:any)=>r.ok)).toEqual([true,true,false]);
   const second=await (await manage('/notes/bulk',bulk)).json() as any;expect(second.results[0].note.id).toBe(first.results[0].note.id);expect(db.sqlite.prepare('SELECT COUNT(*) AS n FROM notes').get()?.n).toBe(2);
   db.queries=0;const result=await (await manage('/notes?q=bulk%20unique&limit=100')).json() as any;expect(result.total).toBe(1);expect(result.notes).toHaveLength(1);expect(db.queries).toBeLessThan(5);
+ });
+});
+describe('management note listing',()=>{
+ it('shares requested filters and exact totals without duplicating notes or trimming card details',async()=>{
+  const sample=fixture();const type={...sample.noteTypes[0],templates:[...sample.noteTypes[0].templates,{name:'Reverse',front:'{{KR}}',back:'{{JP}}'}]};
+  db.sqlite.prepare('UPDATE note_types SET data=?,content_version=5 WHERE id=?').run(JSON.stringify(type),'1');
+  db.sqlite.prepare('INSERT INTO note_types(id,data,content_version) VALUES(?,?,3)').run('2',JSON.stringify({...type,id:'2'}));
+  const deck=db.sqlite.prepare('INSERT INTO decks(id,name,data) VALUES(?,?,?)');
+  for(const [id,name] of [['2','Other'],['3','韓国語::Child']])deck.run(id,name,JSON.stringify({...sample.decks[0],id,name}));
+  const insert=db.sqlite.prepare('INSERT INTO notes(id,data,content_version) VALUES(?,?,7)');
+  for(const [id,noteTypeId,fields,tags] of [
+   ['10','1',['needle','ten'],[]],['2','2',['search%_','two'],['needle']],
+   ['20','2',["' OR 1=1 --",'no cards'],[]],['3','1',['needle','child only'],[]],
+  ] as const)insert.run(id,JSON.stringify({...sample.notes[0],id,noteTypeId,fields,tags,contentFormat:'plain'}));
+  const card=db.sqlite.prepare('INSERT INTO cards(id,note_id,deck_id,ordinal,queue,state,due,schedule,original) SELECT ?,?,?,?, ?,state,due,schedule,original FROM cards WHERE id=\'1\'');
+  card.run('reverse-1','1','1',1,2);card.run('other-1','1','2',1,-1);
+  card.run('card-10','10','1',0,0);card.run('card-2','2','2',0,0);card.run('card-3','3','3',0,0);
+  const all=['1','10','2','20','3'];
+  const cases:[Record<string,string>,string[]][]=[
+   [{},all],[{q:'needle'},['10','2','3']],[{noteTypeId:'1'},['1','10','3']],
+   [{deckId:'1'},['1','10']],[{q:'needle',noteTypeId:'1'},['10','3']],
+   [{q:'needle',deckId:'1'},['10']],[{noteTypeId:'2',deckId:'1'},[]],
+   [{q:'needle',noteTypeId:'1',deckId:'1'},['10']],
+   [{q:'"noteTypeId"'},all],[{q:'search%_'},['2']],[{q:"' OR 1=1 --"},['20']],
+   [{deckId:'missing'},[]],[{q:'',noteTypeId:'',deckId:''},all],
+  ];
+  for(const [filters,ids] of cases){
+   const response=await manage(`/notes?${new URLSearchParams(filters)}`);expect(response.status).toBe(200);
+   const result=await response.json() as any;expect(result.total).toBe(ids.length);expect(result.notes.map((n:any)=>n.id)).toEqual(ids);
+  }
+  const {notes,total}=await (await manage('/notes?deckId=1&limit=1')).json() as any;
+  expect(total).toBe(2);expect(notes[0]).toMatchObject({id:'1',version:1,contentFormat:'html',fields:{JP:'こんにちは',KR:'안녕하세요'}});
+  expect(notes[0].cards).toHaveLength(3);
+  expect(notes[0].cards).toEqual(expect.arrayContaining([
+   {id:'1',deckId:'1',templateId:'template-0',suspended:false},
+   {id:'reverse-1',deckId:'1',templateId:'template-1',suspended:false},
+   {id:'other-1',deckId:'2',templateId:'template-1',suspended:true},
+  ]));
+  const page=await (await manage('/notes?deckId=1&limit=1&offset=1')).json() as any;
+  expect(page.total).toBe(2);expect(page.notes.map((n:any)=>n.id)).toEqual(['10']);expect(page.notes[0]).toMatchObject({version:7,contentFormat:'plain'});
+  expect(await (await manage('/notes?deckId=1&offset=2')).json()).toEqual({notes:[],total:2});
+ });
+ it('preserves lexical ID pages, the 100-note cap, defaults and numeric validation',async()=>{
+  const note=fixture().notes[0];const insert=db.sqlite.prepare('INSERT INTO notes(id,data) VALUES(?,?)');
+  for(let i=0;i<120;i++){const id=`page-${String(i).padStart(3,'0')}`;insert.run(id,JSON.stringify({...note,id}));}
+  const first=await (await manage('/notes?limit=999')).json() as any;
+  expect(first.total).toBe(121);expect(first.notes).toHaveLength(100);expect(first.notes[0].id).toBe('1');expect(first.notes.at(-1).id).toBe('page-098');
+  const later=await (await manage('/notes?limit=100&offset=99')).json() as any;
+  expect(later.total).toBe(121);expect(later.notes.map((n:any)=>n.id)).toEqual(Array.from({length:22},(_,i)=>`page-${String(i+98).padStart(3,'0')}`));
+  expect((await (await manage('/notes')).json() as any).notes).toHaveLength(30);
+  for(const query of ['limit=1.5','offset=1.5',`q=${'x'.repeat(201)}`])expect((await manage(`/notes?${query}`)).status).toBe(400);
+ });
+ it('uses indexed note-card searches rather than repeated full card scans on a large multi-deck page',async()=>{
+  const sample=fixture();db.sqlite.prepare('INSERT INTO decks(id,name,data) VALUES(?,?,?)').run('2','Other',JSON.stringify({...sample.decks[0],id:'2',name:'Other'}));
+  db.sqlite.exec(`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<10000)
+   INSERT INTO notes(id,data) SELECT 'large-'||printf('%05d',i),json_set((SELECT data FROM notes WHERE id='1'),'$.id','large-'||printf('%05d',i)) FROM n;
+   INSERT INTO cards(id,note_id,deck_id,ordinal,queue,state,due,schedule,original)
+   SELECT notes.id||'-'||d.deck_id,notes.id,d.deck_id,0,0,0,0,'{}','{}' FROM notes CROSS JOIN (SELECT '1' deck_id UNION ALL SELECT '2') d WHERE notes.id<>'1';`);
+  for(const query of ['limit=100&offset=9000','deckId=1&limit=100&offset=9000']){
+   db.reads=[];const result=await (await manage(`/notes?${query}`)).json() as any;
+   expect(result.total).toBe(10001);expect(result.notes).toHaveLength(100);expect(result.notes.every((n:any)=>n.cards.length===2)).toBe(true);
+   const plans=db.reads.flatMap(r=>db.sqlite.prepare(`EXPLAIN QUERY PLAN ${r.sql}`).all(...r.args)).map(row=>String(row.detail));
+   expect(plans.some(p=>/SEARCH cards .*INDEX.*\(note_id=\?/.test(p))).toBe(true);
+   expect(plans.some(p=>/SCAN cards\b/.test(p))).toBe(false);
+  }
  });
 });
 describe('AI token isolation',()=>{

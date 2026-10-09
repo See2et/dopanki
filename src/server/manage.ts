@@ -199,10 +199,17 @@ manager.patch('/note-types/:id',async c=>{
 manager.get('/notes',async c=>{
  const limit=Math.max(1,Math.min(100,Number(c.req.query('limit'))||30));const offset=Math.max(0,Number(c.req.query('offset'))||0);requireValue(Number.isInteger(limit)&&Number.isInteger(offset),'ページ指定が不正です。');
  const q=c.req.query('q')??'';requireValue(q.length<=200,'検索語が長すぎます。');
- const conditions=['(?=\'\' OR instr(data,?)>0)','(?=\'\' OR json_extract(data,\'$.noteTypeId\')=?)','(?=\'\' OR EXISTS(SELECT 1 FROM cards WHERE note_id=notes.id AND deck_id=?))'];
- const args=[q,q,c.req.query('noteTypeId')??'',c.req.query('noteTypeId')??'',c.req.query('deckId')??'',c.req.query('deckId')??''];
- const where=conditions.join(' AND ');const rows=await c.env.DB.prepare(`${noteSelect} WHERE ${where.replaceAll('instr(data,','instr(notes.data,').replaceAll("json_extract(data,","json_extract(notes.data,")} ORDER BY notes.id LIMIT ? OFFSET ?`).bind(...args,limit,offset).all<NoteRow>();
- const total=await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM notes WHERE ${where}`).bind(...args).first<{n:number}>();
+ const conditions:string[]=[];const args:string[]=[];
+ const noteTypeId=c.req.query('noteTypeId')??'';const deckId=c.req.query('deckId')??'';
+ if(q){conditions.push('instr(notes.data,?)>0');args.push(q);}
+ if(noteTypeId){conditions.push("json_extract(notes.data,'$.noteTypeId')=?");args.push(noteTypeId);}
+ // LIMIT 1 keeps this a scalar existence check: SQLite 3.51.2's EXISTS-to-join
+ // optimization can otherwise count matching cards toward OFFSET instead of notes.
+ if(deckId){conditions.push('EXISTS(SELECT 1 FROM cards WHERE note_id=notes.id AND deck_id=? LIMIT 1)');args.push(deckId);}
+ // Page and exact count use the same qualified predicates and bound values.
+ const where=conditions.length?` WHERE ${conditions.join(' AND ')}`:'';
+ const rows=await c.env.DB.prepare(`${noteSelect}${where} ORDER BY notes.id LIMIT ? OFFSET ?`).bind(...args,limit,offset).all<NoteRow>();
+ const total=await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM notes${where}`).bind(...args).first<{n:number}>();
  return c.json({notes:rows.results.map(noteFromRow),total:total?.n??0});
 });
 manager.get('/notes/:id',async c=>c.json({note:await getNote(c.env.DB,c.req.param('id'))}));

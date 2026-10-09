@@ -10,6 +10,9 @@ import type { ProgressResponse } from '../src/lib/types';
 let db:TestDb;
 const now=Date.parse('2026-10-04T18:59:00Z');
 const migrations=readdirSync('migrations').filter(f=>f.endsWith('.sql')).sort();
+// These upgrade tests must seed history before the projection migration, not
+// merely before the newest migration (which may only add an unrelated index).
+const projectionMigration=migrations.indexOf('0008_read_reduction.sql');
 function migrate(files=migrations) { for(const f of files)db.sqlite.exec(readFileSync(`migrations/${f}`,'utf8')); }
 function seed() {db.sqlite.exec(importStatements(fixture()).join(';')+';');db.sqlite.exec('DELETE FROM imported_reviews');}
 function imported(id:string,at:number,rating=3) {
@@ -28,7 +31,7 @@ afterEach(()=>{db.sqlite.close();vi.useRealTimers();});
 
 describe('read reduction: SQLite plans and materialized resource bounds (not D1 rows_read)',()=>{
   it('migrates an existing large history without loss, backfills days in SQL, and reuses the historical projection',async()=>{
-    migrate(migrations.slice(0,-1));seed();
+    migrate(migrations.slice(0,projectionMigration));seed();
     const at=Date.parse('2025-01-01T00:00:00Z');
     db.sqlite.prepare(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<40000)
       INSERT INTO imported_reviews SELECT 'old-'||i,'1',json_object('reviewedAt',?+i,'rating',3,'type',1) FROM n`).run(at);
@@ -38,7 +41,7 @@ describe('read reduction: SQLite plans and materialized resource bounds (not D1 
     db.sqlite.exec(`INSERT INTO practice_sessions(id,name,deck_ids,ordering,created_at) VALUES('old-session','p','["1"]','deck','now')`);
     db.sqlite.prepare(`INSERT INTO practice_events(id,session_id,round,card_id,rating,reviewed_at) VALUES('old-practice','old-session',1,'1',3,?)`).run(at);
     const before=db.sqlite.prepare('SELECT COUNT(*) count FROM imported_reviews').get();
-    migrate(migrations.slice(-1));
+    migrate(migrations.slice(projectionMigration));
     expect(db.sqlite.prepare('SELECT COUNT(*) count FROM imported_reviews').get()).toEqual(before);
     expect(db.sqlite.prepare('SELECT COUNT(*) count FROM review_events').get()?.count).toBe(1);
     expect(db.sqlite.prepare('SELECT COUNT(*) count FROM practice_events').get()?.count).toBe(1);
@@ -62,9 +65,9 @@ describe('read reduction: SQLite plans and materialized resource bounds (not D1 
   });
 
   it('keeps fractional imported timestamps in their exact UTC bucket and excludes even sub-millisecond future answers',async()=>{
-    migrate(migrations.slice(0,-1));seed();
+    migrate(migrations.slice(0,projectionMigration));seed();
     const at=Date.parse('2025-01-01T23:59:59.999Z')+0.5;imported('fraction',at);
-    migrate(migrations.slice(-1));
+    migrate(migrations.slice(projectionMigration));
     expect(db.sqlite.prepare('SELECT utc_day FROM progress_dirty').get()?.utc_day).toBe('2025-01-01');
     imported('future',now+0.5);expect(await progress()).toMatchObject({totalStudyDays:1,todayAnswers:0});
     expect(db.sqlite.prepare('SELECT SUM(answers) n FROM progress_days').get()?.n).toBe(1);
@@ -74,11 +77,11 @@ describe('read reduction: SQLite plans and materialized resource bounds (not D1 
   });
 
   it('bounds exceptionally large cold builds below the D1 Free statement budget and resumes without serving truncated history',async()=>{
-    migrate(migrations.slice(0,-1));seed();
+    migrate(migrations.slice(0,projectionMigration));seed();
     const at=Date.parse('2004-01-01T00:00:00Z');
     db.sqlite.prepare(`WITH RECURSIVE n(i) AS(SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<8192)
       INSERT INTO imported_reviews SELECT 'day-'||i,'1',json_object('reviewedAt',?+i*86400000,'rating',3,'type',1) FROM n`).run(at);
-    migrate(migrations.slice(-1));const start=db.queries;
+    migrate(migrations.slice(projectionMigration));const start=db.queries;
     expect((await request()).status).toBe(500);expect(db.queries-start).toBeLessThan(50);
     expect(db.sqlite.prepare('SELECT COUNT(*) n FROM progress_buckets').get()?.n).toBe(8192);
     expect(await progress()).toMatchObject({totalStudyDays:8193});
