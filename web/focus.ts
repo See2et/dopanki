@@ -9,10 +9,10 @@ export interface FocusBatch {
   excluded: string[];
   answers: FocusAnswer[];
 }
-export interface FocusSession { batch: FocusBatch; previous: FocusBatch | null }
+export interface FocusSession { version: 1; batch: FocusBatch; previous: FocusBatch | null }
 export function beginFocus(deckId: string, day: number, ids: string[], previous: FocusBatch | null = null): FocusSession {
   const members = [...new Set(ids)].slice(0,10);
-  return { batch: { deckId, day, number: previous?.day === day ? previous.number + 1 : 1,
+  return { version: 1, batch: { deckId, day, number: previous?.day === day ? previous.number + 1 : 1,
     ids: members, pending: [...members], excluded: [], answers: [] }, previous };
 }
 export function answerFocus(session: FocusSession, answer: FocusAnswer): FocusSession {
@@ -37,7 +37,7 @@ export function undoFocus(session: FocusSession, eventId: string): FocusSession 
   const last = answers.filter(a => a.cardId === undone.cardId).at(-1);
   const pending = batch.pending.filter(id => id !== undone.cardId);
   if (!last?.resolved) pending.push(undone.cardId);
-  return { batch: { ...batch, answers, pending, excluded: batch.excluded.filter(id => id !== undone.cardId) },
+  return { version: 1, batch: { ...batch, answers, pending, excluded: batch.excluded.filter(id => id !== undone.cardId) },
     previous: batch === session.batch ? session.previous : null };
 }
 export function focusStats(batch: FocusBatch) {
@@ -63,6 +63,7 @@ export function readFocus(raw: string | null): FocusSession | null {
       Array.isArray(b.ids) && b.ids.length > 0 && b.ids.length <= 10 && b.ids.every(id => typeof id === 'string' && /^\d+$/.test(id)) && new Set(b.ids).size === b.ids.length &&
       Array.isArray(b.pending) && b.pending.every(id => b.ids.includes(id)) && Array.isArray(b.excluded) && b.excluded.every(id => b.ids.includes(id)) &&
       Array.isArray(b.answers) && b.answers.every(a => typeof a.eventId === 'string' && b.ids.includes(a.cardId) && [1,2,3,4].includes(a.rating) && typeof a.resolved === 'boolean');
-    return value && valid(value.batch) && (value.previous === null || valid(value.previous)) ? value : null;
+    // Unversioned batches were selected with the legacy new-card ordering.
+    return value?.version === 1 && valid(value.batch) && (value.previous === null || valid(value.previous)) ? value : null;
   } catch { return null; }
 }

@@ -1,21 +1,40 @@
 import { test, expect, type Page } from '@playwright/test';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { TestDb } from '../test-db';
 import { fixture } from '../fixture';
 import { importStatements } from '../../src/lib/import';
 import { app } from '../../src/server/index';
+import { studyDayBoundary } from '../../src/lib/scheduler';
 
 // The real server and an isolated in-memory SQLite DB serve API calls; Vite serves the UI.
 const BASE = process.env.DOPANKI_URL || 'http://127.0.0.1:5174';
 const SHOTS = '.local/verification/focus';
-async function setup(page: Page, options: { count?: number; step?: number } = {}) {
+async function setup(page: Page, options: { count?: number; step?: number; legacyBatch?: boolean } = {}) {
   const db = new TestDb();
-  for (const migration of ['0001_initial','0003_authoring','0004_custom_practice','0005_practice_deletion','0006_study_options','0007_restart_new_limit','0008_read_reduction']) db.sqlite.exec(readFileSync(`migrations/${migration}.sql`,'utf8'));
+  for (const migration of readdirSync('migrations').filter(f=>f.endsWith('.sql')).sort()) db.sqlite.exec(readFileSync(`migrations/${migration}`,'utf8'));
   const d = fixture();
   d.cards = Array.from({length:options.count ?? 13},(_,i)=>({...d.cards[0],id:String(i+1)}));
   if (options.step) d.decks[0].config.relearningSteps = [options.step];
+  if (options.legacyBatch) {
+    d.reviews=[];
+    d.notes=d.cards.map(c=>({...d.notes[0],id:c.id,fields:[`new-note-${c.id}!`,'answer']}));
+    d.cards=d.cards.map(c=>({...c,noteId:c.id,type:0,queue:0,due:0,dueAt:null,reps:0,lapses:0,lastReview:null,stability:null,difficulty:null}));
+  }
   db.sqlite.exec(importStatements(d).join(';')+';');
+  if (options.legacyBatch) {
+    for (const cardId of ['7','12','22']) {
+      const response=await app.request(`${BASE}/api/review`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({eventId:`legacy-answer-event-${cardId}`,cardId,revision:0,rating:1,deckId:'1'})},{DB:db as unknown as D1Database});
+      expect(response.status).toBe(200);
+    }
+    const day=studyDayBoundary(Date.now(),d.collection.timeZone,d.collection.dayStart);
+    await page.addInitScript(({day})=>{
+      localStorage.setItem('dopanki_focus','on');
+      sessionStorage.setItem('dopanki_deck','1');
+      if (!sessionStorage.getItem('dopanki_focus_1')) sessionStorage.setItem('dopanki_focus_1',JSON.stringify({batch:{deckId:'1',day,number:1,ids:['7','12','22','28','30'],pending:['7','12','22','28','30'],excluded:[],answers:[]},previous:null}));
+    },{day});
+  }
+  const before={cards:db.sqlite.prepare('SELECT * FROM cards ORDER BY id').all(),events:db.sqlite.prepare('SELECT * FROM review_events ORDER BY id').all()};
   const answered: string[] = [];
   await page.route(`${BASE}/api/**`,async route => {
     const r = route.request();
@@ -26,9 +45,9 @@ async function setup(page: Page, options: { count?: number; step?: number } = {}
   await page.emulateMedia({reducedMotion:'reduce'});
   await page.addInitScript(()=>localStorage.setItem('dopanki_sound','off'));
   await page.goto(BASE);
-  await page.locator('[data-deck="1"]').click();
+  if (!options.legacyBatch) await page.locator('[data-deck="1"]').click();
   await expect(page.locator('#reveal')).toBeVisible();
-  return {db,answered};
+  return {db,answered,before};
 }
 async function answer(page: Page, rating: number) {
   await page.locator('#reveal').click();
@@ -73,6 +92,22 @@ test('ten-card batch repeats failures, reports results, survives reload/undo and
     await expect(page.locator('.progress-mode')).toHaveText('連続モード');
     expect(await page.evaluate(()=>localStorage.getItem('dopanki_focus'))).toBe('off');
   } finally { db.sqlite.close(); }
+});
+
+test('rebuilds an unversioned legacy batch in note order without resetting server learning',async({page})=>{
+  const {db,before}=await setup(page,{count:30,legacyBatch:true});
+  try {
+    // The legacy subset would pick new card 28 after the three test answers.
+    await expect(page.frameLocator('#card-frame').locator('body')).toContainText('new-note-1!');
+    expect(db.sqlite.prepare('SELECT * FROM cards ORDER BY id').all()).toEqual(before.cards);
+    expect(db.sqlite.prepare('SELECT * FROM review_events ORDER BY id').all()).toEqual(before.events);
+    expect(before.events).toHaveLength(3);
+    const saved=await page.evaluate(()=>sessionStorage.getItem('dopanki_focus_1'));
+    expect(JSON.parse(saved!).batch.ids[0]).toBe('1');
+    await page.reload();
+    await expect(page.frameLocator('#card-frame').locator('body')).toContainText('new-note-1!');
+    expect(await page.evaluate(()=>sessionStorage.getItem('dopanki_focus_1'))).toBe(saved);
+  } finally {db.sqlite.close();}
 });
 
 test('long learning step shows waiting, refreshes automatically, and keeps the failed card in its batch',async({page})=>{
