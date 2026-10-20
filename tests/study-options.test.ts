@@ -4,6 +4,7 @@ import { TestDb } from './test-db';
 import { fixture } from './fixture';
 import { importStatements } from '../src/lib/import';
 import { app } from '../src/server/index';
+import { studyContext, studyCandidates, preloadOverviewCandidates } from '../src/server/study-options';
 import { studyDayBoundary, nextStudyDayBoundary } from '../src/lib/scheduler';
 import type { ImportDocument } from '../src/lib/types';
 let db:TestDb;
@@ -37,6 +38,33 @@ beforeEach(()=>{
   seed(doc());
 });
 afterEach(()=>{db.sqlite.close();vi.useRealTimers();});
+it('introduces new notes in addition order, with template order and the same daily cap for cached and focused candidates',async()=>{
+  const d=doc(0,0,4);d.decks[0].config.newPerDay=2;
+  d.noteTypes[0].templates.push({...d.noteTypes[0].templates[0],name:'Second'});
+  d.notes=['30','10','20'].map(id=>({...d.notes[0],id}));
+  // Note insertion, card insertion, card IDs and imported new positions disagree.
+  const card=d.cards[0];
+  d.cards=[
+    {...card,id:'21',noteId:'20',ordinal:0,due:0},
+    {...card,id:'81',noteId:'10',ordinal:0,due:0},
+    {...card,id:'11',noteId:'30',ordinal:1,due:1},
+    {...card,id:'91',noteId:'30',ordinal:0,due:99},
+  ];
+  seed(d);
+  const before=db.sqlite.prepare('SELECT * FROM cards ORDER BY id').all();
+  for(const path of ['/api/study/1','/api/study/1?focusIds=21,81,11,91']) {
+    const response=await get(path);
+    expect(response.card.id).toBe('91');expect(response.candidateIds).toEqual(['91','11']);
+    expect(response.counts.new).toBe(2);
+  }
+  const ctx=(await studyContext(db as unknown as D1Database,now))!;
+  await preloadOverviewCandidates(ctx);
+  const cached=(await studyCandidates(ctx,'1'))!;
+  expect(cached.row?.id).toBe('91');expect(cached.candidateIds).toEqual(['91','11']);
+  expect(cached.counts.new).toBe(2);
+  expect(db.sqlite.prepare('SELECT * FROM cards ORDER BY id').all()).toEqual(before);
+});
+
 describe('new cards alongside restart and Flatten',()=>{
   it('introduces the daily new quota before backlog, keeps learning first, and preserves FSRS on apply/undo',async()=>{
     const setup={dailyReviewLimit:2,backlogPerDay:2,dailyNewLimit:1,flatten:true};

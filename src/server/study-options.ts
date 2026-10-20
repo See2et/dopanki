@@ -31,11 +31,12 @@ interface Assignment { cardId: string; revision: number; due: number; availableA
 interface PreviewRow { token: string; deck_id: string; generation: number; study_day: number;
   daily_review_limit: number; daily_new_limit: number; backlog_per_day: number; flattened: number; scope: string;
   assignments: string; summary: string }
+interface CandidateCard extends StoredCard { note_order: number }
 export interface StudyContext {
   db: D1Database; now: number; boundary: number; generation: number;
   collection: ImportDocument['collection']; decks: DeckSummary[]; originalDecks: Deck[];
   totals: DeckTotals[]; answers: DeckAnswers[]; extras: ExtraRow[]; restarts: RestartRow[]; members: Member[];
-  restartUsage: {id:string;cards:number}[]; creditEvents:CreditEvent[]; cards?:StoredCard[]; retrievabilities?:Map<string,number>; memberIndex?:Map<string,Member>; activeMemberCache?:Map<string,Member|undefined>;
+  restartUsage: {id:string;cards:number}[]; creditEvents:CreditEvent[]; cards?:CandidateCard[]; retrievabilities?:Map<string,number>; memberIndex?:Map<string,Member>; activeMemberCache?:Map<string,Member|undefined>;
   capCache?:Map<string,Map<string,Cap[]>>; restartCache?:Map<string,RestartRow|undefined>;
 }
 const parse = <T>(value: string): T => JSON.parse(value) as T;
@@ -328,10 +329,11 @@ export async function optionsResponse(ctx: StudyContext, selectedId: string, det
 }
 
 const candidateColumns=`SELECT id,note_id,deck_id,ordinal,queue,due,state,schedule,revision,last_event_id,
+  (SELECT rowid FROM notes WHERE notes.id=cards.note_id) AS note_order,
   json_object('due',json_extract(original,'$.due'),'queue',json_extract(original,'$.queue'),
     'reps',json_extract(original,'$.reps'),'lastReview',json_extract(original,'$.lastReview')) AS original FROM cards`;
 export async function preloadOverviewCandidates(ctx:StudyContext):Promise<void> {
-  ctx.cards=(await ctx.db.prepare(`${candidateColumns} WHERE queue>=0`).all<StoredCard>()).results;
+  ctx.cards=(await ctx.db.prepare(`${candidateColumns} WHERE queue>=0`).all<CandidateCard>()).results;
 }
 
 export async function studyCandidates(ctx: StudyContext, selectedId: string, focusIds?: string[]): Promise<{
@@ -345,7 +347,7 @@ export async function studyCandidates(ctx: StudyContext, selectedId: string, foc
   // must never populate it, or a later parent/sibling would see incomplete candidates.
   const cards=ctx.cards??(await ctx.db.prepare(`${candidateColumns} WHERE queue>=0
     AND deck_id IN(SELECT value FROM json_each(?))${focusIds?' AND id IN(SELECT value FROM json_each(?))':''}`)
-    .bind(JSON.stringify(eligibility.map(e=>e.id)),...(focusIds?[JSON.stringify(focusIds)]:[])).all<StoredCard>()).results;
+    .bind(JSON.stringify(eligibility.map(e=>e.id)),...(focusIds?[JSON.stringify(focusIds)]:[])).all<CandidateCard>()).results;
   const byDeck=new Map(eligibility.map(e=>[e.id,e]));
   const nextBoundary=nextStudyDayBoundary(ctx.boundary,ctx.collection.timeZone,ctx.collection.dayStart);
   const focus=focusIds?new Set(focusIds):null;
@@ -376,7 +378,9 @@ export async function studyCandidates(ctx: StudyContext, selectedId: string, foc
       const r=(ctx.retrievabilities!.get(b.id)??0)-(ctx.retrievabilities!.get(a.id)??0);
       if(r)return r;
     }
-    return (a.queue===0?parse<{due:number}>(a.original).due:a.due)-(b.queue===0?parse<{due:number}>(b.original).due:b.due)||a.id.localeCompare(b.id);
+    // Only first introductions follow note insertion order; scheduled work keeps its priorities.
+    if(a.queue===0&&b.queue===0)return a.note_order-b.note_order||a.ordinal-b.ordinal||a.id.localeCompare(b.id);
+    return a.due-b.due||a.id.localeCompare(b.id);
   });
   const reservations:Reservations={base:new Map(),restart:new Map(),backlog:new Map(),grants:new Map()};
   const counts={new:0,review:0,learning:pending.filter(c=>c.due>ctx.now).length,total:focus?rows.results.length:selected.counts.total};
