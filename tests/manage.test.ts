@@ -156,13 +156,17 @@ describe('management note listing',()=>{
   expect(page.total).toBe(2);expect(page.notes.map((n:any)=>n.id)).toEqual(['10']);expect(page.notes[0]).toMatchObject({version:7,contentFormat:'plain'});
   expect(await (await manage('/notes?deckId=1&offset=2')).json()).toEqual({notes:[],total:2});
  });
- it('preserves lexical ID pages, the 100-note cap, defaults and numeric validation',async()=>{
+ it('lists notes in addition order across pages and search without moving edited notes',async()=>{
   const note=fixture().notes[0];const insert=db.sqlite.prepare('INSERT INTO notes(id,data) VALUES(?,?)');
-  for(let i=0;i<120;i++){const id=`page-${String(i).padStart(3,'0')}`;insert.run(id,JSON.stringify({...note,id}));}
+  for(let i=119;i>=0;i--){const id=`page-${String(i).padStart(3,'0')}`;insert.run(id,JSON.stringify({...note,id,fields:['addition-order',String(i)]}));}
+  expect((await manage('/notes/page-060',{version:1,fields:{KR:'edited'}},'PATCH')).status).toBe(200);
   const first=await (await manage('/notes?limit=999')).json() as any;
-  expect(first.total).toBe(121);expect(first.notes).toHaveLength(100);expect(first.notes[0].id).toBe('1');expect(first.notes.at(-1).id).toBe('page-098');
+  expect(first.total).toBe(121);expect(first.notes).toHaveLength(100);expect(first.notes[0].id).toBe('1');expect(first.notes.at(-1).id).toBe('page-021');
   const later=await (await manage('/notes?limit=100&offset=99')).json() as any;
-  expect(later.total).toBe(121);expect(later.notes.map((n:any)=>n.id)).toEqual(Array.from({length:22},(_,i)=>`page-${String(i+98).padStart(3,'0')}`));
+  expect(later.total).toBe(121);expect(later.notes.map((n:any)=>n.id)).toEqual(Array.from({length:22},(_,i)=>`page-${String(21-i).padStart(3,'0')}`));
+  const filtered=await (await manage('/notes?q=addition-order&noteTypeId=1&limit=3&offset=58')).json() as any;
+  expect(filtered.total).toBe(120);expect(filtered.notes.map((n:any)=>n.id)).toEqual(['page-061','page-060','page-059']);
+  expect(filtered.notes[1].fields.KR).toBe('edited');
   expect((await (await manage('/notes')).json() as any).notes).toHaveLength(30);
   for(const query of ['limit=1.5','offset=1.5',`q=${'x'.repeat(201)}`])expect((await manage(`/notes?${query}`)).status).toBe(400);
  });

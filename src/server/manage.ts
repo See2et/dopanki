@@ -208,7 +208,8 @@ manager.get('/notes',async c=>{
  if(deckId){conditions.push('EXISTS(SELECT 1 FROM cards WHERE note_id=notes.id AND deck_id=? LIMIT 1)');args.push(deckId);}
  // Page and exact count use the same qualified predicates and bound values.
  const where=conditions.length?` WHERE ${conditions.join(' AND ')}`:'';
- const rows=await c.env.DB.prepare(`${noteSelect}${where} ORDER BY notes.id LIMIT ? OFFSET ?`).bind(...args,limit,offset).all<NoteRow>();
+ // Existing notes retain insertion order in rowid; content edits only UPDATE them.
+ const rows=await c.env.DB.prepare(`${noteSelect}${where} ORDER BY notes.rowid LIMIT ? OFFSET ?`).bind(...args,limit,offset).all<NoteRow>();
  const total=await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM notes${where}`).bind(...args).first<{n:number}>();
  return c.json({notes:rows.results.map(noteFromRow),total:total?.n??0});
 });
