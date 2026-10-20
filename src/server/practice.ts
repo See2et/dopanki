@@ -15,12 +15,30 @@ interface Session {
   round: number;
   revision: number;
   last_event_id: string | null;
+  answer_count: number;
 }
 interface Member {
   card_id: string;
   position: number;
   rating: number | null;
   event_id: string | null;
+  completed: number;
+  retry_after: number | null;
+  again_seen: number;
+}
+interface AnswerSnapshot {
+  member: Member;
+  answerCount: number;
+}
+// Ready retries take precedence over fresh cards; the snapshot position breaks ties.
+// When only waiting retries remain, use the earliest one without a time delay.
+function nextMember(rows: Member[], answerCount: number) {
+  const pending = rows.filter((r) => !r.completed);
+  const retries = pending.filter((r) => r.retry_after !== null)
+    .sort((a, b) => a.retry_after! - b.retry_after! || a.position - b.position);
+  return retries.find((r) => r.retry_after! <= answerCount)
+    ?? pending.find((r) => r.retry_after === null)
+    ?? retries[0];
 }
 class Failure extends Error {
   constructor(
@@ -68,7 +86,7 @@ async function response(
   s: Session,
 ): Promise<PracticeStudyResponse> {
   const rows = await members(db, s);
-  const next = rows.find((r) => r.rating === null);
+  const next = nextMember(rows, s.answer_count);
   let card: StudyCard | null = null;
   if (next) {
     const row = await db
@@ -97,7 +115,7 @@ async function response(
       };
     }
   }
-  const position = rows.filter((r) => r.rating !== null).length;
+  const position = rows.filter((r) => r.completed).length;
   return {
     card,
     counts: {
@@ -115,7 +133,7 @@ async function response(
       position,
       total: rows.length,
       revision: s.revision,
-      againCount: rows.filter((r) => r.rating === 1).length,
+      againCount: rows.filter((r) => r.again_seen).length,
       lastEventId: s.last_event_id,
     },
   };
@@ -309,16 +327,18 @@ practice.post('/', async (c) => {
       );
       check(b.order === 'deck' || b.order === 'shuffle', '出題順が不正です。');
       const ids = [...new Set(b.deckIds as string[])];
-      const cards = await scope(c.env.DB, ids, b.order);
+      // Keep accepting legacy deck-order input, but new rounds are always random.
+      const cards = await scope(c.env.DB, ids, 'shuffle');
       const id = crypto.randomUUID();
       const s: Session = {
         id,
         name: b.name.trim(),
         deck_ids: JSON.stringify(ids),
-        ordering: b.order,
+        ordering: 'shuffle',
         round: 1,
         revision: 0,
         last_event_id: null,
+        answer_count: 0,
       };
       return {
         result: {
@@ -328,7 +348,7 @@ practice.post('/', async (c) => {
             round: 1,
             position: 0,
             total: cards.length,
-            order: b.order,
+            order: s.ordering,
             deckIds: ids,
           },
         },
@@ -370,11 +390,12 @@ practice.post('/:id/review', async (c) => {
       const s = await session(c.env.DB, c.req.param('id'));
       check(b.revision === s.revision, '練習が更新されています。', 409);
       const rows = await members(c.env.DB, s);
-      check(
-        rows.find((r) => r.rating === null)?.card_id === b.cardId,
-        '現在のカードを回答してください。',
-        409,
-      );
+      const member = nextMember(rows, s.answer_count);
+      check(member && member.card_id === b.cardId, '現在のカードを回答してください。', 409);
+      const rating = Number(b.rating);
+      const completed = rating >= 3 ? 1 : 0;
+      const retryAfter = completed ? null : s.answer_count + 1 + (rating === 1 ? 3 : 5);
+      const previousState: AnswerSnapshot = { member, answerCount: s.answer_count };
       return {
         result: { ok: true, eventId: b.eventId, revision: s.revision + 1 },
         statements: [
@@ -384,7 +405,7 @@ practice.post('/:id/review', async (c) => {
             [s.id, s.revision, String(b.cardId)],
           ),
           c.env.DB.prepare(
-            'INSERT INTO practice_events(id,session_id,round,card_id,rating,previous_event_id,reviewed_at) VALUES(?,?,?,?,?,?,?)',
+            'INSERT INTO practice_events(id,session_id,round,card_id,rating,previous_event_id,reviewed_at,previous_state) VALUES(?,?,?,?,?,?,?,?)',
           ).bind(
             String(b.eventId),
             s.id,
@@ -393,18 +414,22 @@ practice.post('/:id/review', async (c) => {
             Number(b.rating),
             s.last_event_id,
             Date.now(),
+            JSON.stringify(previousState),
           ),
           c.env.DB.prepare(
-            'UPDATE practice_members SET rating=?,event_id=? WHERE session_id=? AND round=? AND card_id=?',
+            'UPDATE practice_members SET rating=?,event_id=?,completed=?,retry_after=?,again_seen=? WHERE session_id=? AND round=? AND card_id=?',
           ).bind(
-            Number(b.rating),
+            rating,
             String(b.eventId),
+            completed,
+            retryAfter,
+            rating === 1 ? 1 : member.again_seen,
             s.id,
             s.round,
             String(b.cardId),
           ),
           c.env.DB.prepare(
-            'UPDATE practice_sessions SET revision=revision+1,last_event_id=? WHERE id=?',
+            'UPDATE practice_sessions SET revision=revision+1,answer_count=answer_count+1,last_event_id=? WHERE id=?',
           ).bind(String(b.eventId), s.id),
         ],
       };
@@ -420,26 +445,26 @@ practice.post('/:id/round', async (c) => {
       check(b.mode === 'all' || b.mode === 'again', '周回モードが不正です。');
       const rows = await members(c.env.DB, s);
       check(
-        !rows.some((r) => r.rating === null),
+        !rows.some((r) => !r.completed),
         '現在の周回を完了してください。',
         409,
       );
       const cards =
         b.mode === 'all'
-          ? await scope(c.env.DB, parse(s.deck_ids), s.ordering)
-          : rows.filter((r) => r.rating === 1).map((r) => r.card_id);
-      if (b.mode === 'again' && s.ordering === 'shuffle') shuffle(cards);
+          ? await scope(c.env.DB, parse(s.deck_ids), 'shuffle')
+          : rows.filter((r) => r.again_seen).map((r) => r.card_id);
+      if (b.mode === 'again') shuffle(cards);
       return {
         result: { ok: true, round: s.round + 1, revision: s.revision + 1 },
         statements: [
           guard(
             c.env.DB,
-            'EXISTS(SELECT 1 FROM practice_sessions WHERE id=? AND revision=?) AND NOT EXISTS(SELECT 1 FROM practice_members m JOIN cards c ON c.id=m.card_id WHERE m.session_id=? AND m.round=? AND m.rating IS NULL AND c.queue>=0)',
+            'EXISTS(SELECT 1 FROM practice_sessions WHERE id=? AND revision=?) AND NOT EXISTS(SELECT 1 FROM practice_members m JOIN cards c ON c.id=m.card_id WHERE m.session_id=? AND m.round=? AND m.completed=0 AND c.queue>=0)',
             [s.id, s.revision, s.id, s.round],
           ),
           insertMembers(c.env.DB, s.id, s.round + 1, cards),
           c.env.DB.prepare(
-            'UPDATE practice_sessions SET round=round+1,revision=revision+1,last_event_id=NULL WHERE id=?',
+            "UPDATE practice_sessions SET round=round+1,revision=revision+1,last_event_id=NULL,answer_count=0,ordering='shuffle' WHERE id=?",
           ).bind(s.id),
         ],
       };
@@ -458,6 +483,7 @@ practice.post('/:id/undo', async (c) => {
       round: number;
       card_id: string;
       previous_event_id: string | null;
+      previous_state: string | null;
       undone: number;
     }>();
   check(e, '回答が見つかりません。', 404);
@@ -467,6 +493,8 @@ practice.post('/:id/undo', async (c) => {
     '最後の回答だけ取り消せます。',
     409,
   );
+  // Legacy events predate snapshots and only ever changed an unanswered member.
+  const previous = e.previous_state ? parse<AnswerSnapshot>(e.previous_state) : null;
   try {
     await c.env.DB.batch([
       guard(
@@ -475,14 +503,21 @@ practice.post('/:id/undo', async (c) => {
         [s.id, s.revision, eventId],
       ),
       c.env.DB.prepare(
-        'UPDATE practice_members SET rating=NULL,event_id=NULL WHERE session_id=? AND round=? AND card_id=?',
-      ).bind(s.id, s.round, e.card_id),
+        'UPDATE practice_members SET rating=?,event_id=?,completed=?,retry_after=?,again_seen=? WHERE session_id=? AND round=? AND card_id=?',
+      ).bind(
+        previous?.member.rating ?? null,
+        previous?.member.event_id ?? null,
+        previous?.member.completed ?? 0,
+        previous?.member.retry_after ?? null,
+        previous?.member.again_seen ?? 0,
+        s.id, s.round, e.card_id,
+      ),
       c.env.DB.prepare('UPDATE practice_events SET undone=1 WHERE id=?').bind(
         eventId,
       ),
       c.env.DB.prepare(
-        'UPDATE practice_sessions SET revision=revision+1,last_event_id=NULL WHERE id=?',
-      ).bind(s.id),
+        'UPDATE practice_sessions SET revision=revision+1,last_event_id=NULL,answer_count=? WHERE id=?',
+      ).bind(previous?.answerCount ?? s.answer_count, s.id),
       c.env.DB.prepare('DELETE FROM practice_guards'),
     ]);
   } catch (error) {

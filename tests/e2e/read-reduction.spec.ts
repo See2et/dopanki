@@ -121,9 +121,16 @@ test('focused batches perform neither invisible progress nor options reads; prac
     await page.locator('[name="deck"][value="1"]').check();
     await page.getByRole('button',{name:'保存して始める'}).click();
     await expect(page.locator('#reveal')).toBeVisible();expect(s.counts()).toEqual({progress:2,options:0});
+    await rate(page,1);await expect(page.locator('#reveal')).toBeVisible();
+    await expect(page.locator('.practice-mode')).toContainText('完了 0 / 1枚');
+    expect(s.counts()).toEqual({progress:2,options:0});
+    await page.reload();await expect(page.locator('#reveal')).toBeVisible();
+    await rate(page,2);await expect(page.locator('#reveal')).toBeVisible();
+    await expect(page.locator('.practice-mode')).toContainText('完了 0 / 1枚');
     await rate(page);await expect(page.locator('#finale')).toBeVisible();
+    await expect(page.locator('[data-round="again"]')).toContainText('この周で忘れたカードだけ（1枚）');
     await expect(page.locator('.tomorrow-result')).toContainText('1枚減りました');
-    expect(s.progressResponses.at(-1)).toMatchObject({todayPracticeAnswers:1,todayNormalAnswers:1});
+    expect(s.progressResponses.at(-1)).toMatchObject({todayPracticeAnswers:3,todayNormalAnswers:1});
     expect(s.counts()).toEqual({progress:3,options:0});
   } finally {s.db.sqlite.close();}
 });

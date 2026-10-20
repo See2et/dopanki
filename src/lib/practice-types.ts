@@ -3,6 +3,7 @@ export interface PracticeSession {
   id: string;
   name: string;
   round: number;
+  /** Cards completed in this round, not the number of answers. */
   position: number;
   total: number;
   order: 'deck' | 'shuffle';
@@ -12,9 +13,11 @@ export interface PracticeSummary {
   id: string;
   name: string;
   round: number;
+  /** Cards completed in this round, not the number of answers. */
   position: number;
   total: number;
   revision: number;
+  /** Distinct cards rated Again at least once this round, excluding undone answers. */
   againCount: number;
   lastEventId: string | null;
 }
