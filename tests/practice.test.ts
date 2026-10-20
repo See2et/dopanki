@@ -208,10 +208,10 @@ it('rolls back a review when a concurrent revision changes between read and comm
   const id = await create();
   let fired = false;
   db.afterFirst = (sql) => {
-    if (!fired && sql.includes('SELECT * FROM practice_sessions')) {
+    if (!fired && sql.includes('SELECT *,state_revision AS revision FROM practice_sessions')) {
       fired = true;
       db.sqlite
-        .prepare('UPDATE practice_sessions SET revision=revision+1 WHERE id=?')
+        .prepare('UPDATE practice_sessions SET state_revision=state_revision+1 WHERE id=?')
         .run(id);
     }
   };
@@ -242,9 +242,9 @@ it.each(['undo', 'round'] as const)('rolls back %s when a concurrent revision ch
   const receipts = db.sqlite.prepare('SELECT * FROM practice_receipts').all();
   let fired = false;
   db.afterFirst = (sql) => {
-    if (!fired && sql.includes('SELECT * FROM practice_sessions')) {
+    if (!fired && sql.includes('SELECT *,state_revision AS revision FROM practice_sessions')) {
       fired = true;
-      db.sqlite.prepare('UPDATE practice_sessions SET revision=revision+1 WHERE id=?').run(id);
+      db.sqlite.prepare('UPDATE practice_sessions SET state_revision=state_revision+1 WHERE id=?').run(id);
     }
   };
   const body = operation === 'undo' ? {eventId:last.eventId}
@@ -354,6 +354,33 @@ it('migrates legacy completed Again/Hard without reopening them and preserves un
   expect((await req('/legacy/round',{requestId:key(),revision:s.practice.revision,mode:'again'})).status).toBe(200);
   expect((await get('legacy')).practice).toMatchObject({round:2,position:0,total:1,againCount:0});
   expect((await get('legacy')).card.id).toBe('1');
+});
+
+it('fences late legacy writes at migration without losing acknowledged answers or undo state', async () => {
+  db.sqlite.close(); initialize(true);
+  db.sqlite.exec(`INSERT INTO practice_sessions(id,name,deck_ids,ordering,revision,last_event_id,created_at) VALUES('cutover','old','["1"]','deck',7,'legacy-cutover-event','now');
+    INSERT INTO practice_members(session_id,round,card_id,position,rating,event_id) VALUES('cutover',1,'1',0,1,'legacy-cutover-event');
+    INSERT INTO practice_events(id,session_id,round,card_id,rating,reviewed_at) VALUES('legacy-cutover-event','cutover',1,'1',1,0);`);
+  db.sqlite.exec(readFileSync('migrations/0010_practice_repetition.sql','utf8'));
+  const before = db.sqlite.prepare('SELECT * FROM practice_members').all();
+  // Old workers finish every review/undo/round/delete batch by updating revision.
+  // Even a batch already holding pre-migration state must fail and roll back.
+  for (const rating of [null, 1, 3]) {
+    await expect(db.batch([
+      db.prepare('UPDATE practice_members SET rating=?,event_id=NULL WHERE session_id=?').bind(rating,'cutover'),
+      db.prepare('UPDATE practice_sessions SET revision=revision+1,last_event_id=NULL WHERE id=?').bind('cutover'),
+    ])).rejects.toThrow();
+    expect(db.sqlite.prepare('SELECT * FROM practice_members').all()).toEqual(before);
+  }
+  expect((await get('cutover')).practice).toMatchObject({revision:7,position:1,againCount:1,lastEventId:'legacy-cutover-event'});
+  expect((await req('/cutover/undo',{eventId:'legacy-cutover-event'})).status).toBe(200);
+  expect((await get('cutover')).practice).toMatchObject({revision:8,position:0,againCount:0});
+  await answer('cutover',3);
+  expect((await get('cutover')).practice).toMatchObject({revision:9,position:1});
+  const { app } = await import('../src/server/index');
+  const exported = await (await app.request('http://localhost/api/export',{}, {DB:db as unknown as D1Database})).json() as any;
+  expect(exported.practiceSessions[0]).toMatchObject({id:'cutover',revision:9});
+  expect(exported.practiceSessions[0]).not.toHaveProperty('state_revision');
 });
 
 it('does not expose practice to bearer authoring credentials', async () => {

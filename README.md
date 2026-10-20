@@ -218,10 +218,12 @@ Workers＋D1＋R2で配置します。本番は`production`環境を使い、ロ
 既存の本番環境を更新する場合は、次を実行します。保存済みの教材・学習状態と秘密は引き継がれます。
 
 ```sh
-npm run deploy
-# DBの変更があるときだけ
+# DBの変更があるときだけ、先に適用する
 npx wrangler d1 migrations apply dopanki --env production --remote
+npm run deploy
 ```
+
+0010の適用後は旧Workerから練習を更新できなくなるため、続けてデプロイしてください。切り替え中に練習の保存が失敗した場合は、更新後に再試行してください。0010より前のWorkerへ戻す場合はDBも対応する復元ポイントへ戻す必要があり、その後の学習を失うため、Workerだけをロールバックしないでください。
 
 初めて別アカウントへ配置する場合は、以下の手順でリソースを作成します。最初は`[env.production]`の`workers_dev`を`false`にして配置し、Cloudflare管理画面のWorkers & Pages → dopanki → Accessで「すべてのTraffic」と自分のメールアドレスだけを許可するポリシーを設定します。設定を確認してから`workers_dev = true`で再配置してください。
 

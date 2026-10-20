@@ -65,7 +65,7 @@ const key = (v: unknown) => {
 };
 async function session(db: D1Database, id: string) {
   const s = await db
-    .prepare('SELECT * FROM practice_sessions WHERE id=? AND deleted_at IS NULL')
+    .prepare('SELECT *,state_revision AS revision FROM practice_sessions WHERE id=? AND deleted_at IS NULL')
     .bind(id)
     .first<Session>();
   check(s, '練習が見つかりません。', 404);
@@ -290,7 +290,7 @@ practice.use('*', async (c, next) => {
 practice.get('/', async (c) => {
   const rows = (
     await c.env.DB.prepare(
-      'SELECT * FROM practice_sessions WHERE deleted_at IS NULL ORDER BY created_at DESC,id',
+      'SELECT *,state_revision AS revision FROM practice_sessions WHERE deleted_at IS NULL ORDER BY created_at DESC,id',
     ).all<Session>()
   ).results;
   const sessions: PracticeSession[] = [];
@@ -371,7 +371,7 @@ practice.post('/:id/delete', async c => {
     const selected = await session(c.env.DB, c.req.param('id'));
     return { result: { ok: true }, statements: [
       guard(c.env.DB, 'EXISTS(SELECT 1 FROM practice_sessions WHERE id=? AND deleted_at IS NULL)', [selected.id]),
-      c.env.DB.prepare('UPDATE practice_sessions SET deleted_at=?,revision=revision+1,last_event_id=NULL WHERE id=?')
+      c.env.DB.prepare('UPDATE practice_sessions SET deleted_at=?,state_revision=state_revision+1,last_event_id=NULL WHERE id=?')
         .bind(Date.now(), selected.id),
       c.env.DB.prepare('DELETE FROM practice_members WHERE session_id=?').bind(selected.id),
     ] };
@@ -401,7 +401,7 @@ practice.post('/:id/review', async (c) => {
         statements: [
           guard(
             c.env.DB,
-            'EXISTS(SELECT 1 FROM practice_sessions WHERE id=? AND revision=?) AND EXISTS(SELECT 1 FROM cards WHERE id=? AND queue>=0)',
+            'EXISTS(SELECT 1 FROM practice_sessions WHERE id=? AND state_revision=?) AND EXISTS(SELECT 1 FROM cards WHERE id=? AND queue>=0)',
             [s.id, s.revision, String(b.cardId)],
           ),
           c.env.DB.prepare(
@@ -429,7 +429,7 @@ practice.post('/:id/review', async (c) => {
             String(b.cardId),
           ),
           c.env.DB.prepare(
-            'UPDATE practice_sessions SET revision=revision+1,answer_count=answer_count+1,last_event_id=? WHERE id=?',
+            'UPDATE practice_sessions SET state_revision=state_revision+1,answer_count=answer_count+1,last_event_id=? WHERE id=?',
           ).bind(String(b.eventId), s.id),
         ],
       };
@@ -459,12 +459,12 @@ practice.post('/:id/round', async (c) => {
         statements: [
           guard(
             c.env.DB,
-            'EXISTS(SELECT 1 FROM practice_sessions WHERE id=? AND revision=?) AND NOT EXISTS(SELECT 1 FROM practice_members m JOIN cards c ON c.id=m.card_id WHERE m.session_id=? AND m.round=? AND m.completed=0 AND c.queue>=0)',
+            'EXISTS(SELECT 1 FROM practice_sessions WHERE id=? AND state_revision=?) AND NOT EXISTS(SELECT 1 FROM practice_members m JOIN cards c ON c.id=m.card_id WHERE m.session_id=? AND m.round=? AND m.completed=0 AND c.queue>=0)',
             [s.id, s.revision, s.id, s.round],
           ),
           insertMembers(c.env.DB, s.id, s.round + 1, cards),
           c.env.DB.prepare(
-            "UPDATE practice_sessions SET round=round+1,revision=revision+1,last_event_id=NULL,answer_count=0,ordering='shuffle' WHERE id=?",
+            "UPDATE practice_sessions SET round=round+1,state_revision=state_revision+1,last_event_id=NULL,answer_count=0,ordering='shuffle' WHERE id=?",
           ).bind(s.id),
         ],
       };
@@ -499,7 +499,7 @@ practice.post('/:id/undo', async (c) => {
     await c.env.DB.batch([
       guard(
         c.env.DB,
-        'EXISTS(SELECT 1 FROM practice_sessions WHERE id=? AND revision=? AND last_event_id=?)',
+        'EXISTS(SELECT 1 FROM practice_sessions WHERE id=? AND state_revision=? AND last_event_id=?)',
         [s.id, s.revision, eventId],
       ),
       c.env.DB.prepare(
@@ -516,7 +516,7 @@ practice.post('/:id/undo', async (c) => {
         eventId,
       ),
       c.env.DB.prepare(
-        'UPDATE practice_sessions SET revision=revision+1,last_event_id=NULL,answer_count=? WHERE id=?',
+        'UPDATE practice_sessions SET state_revision=state_revision+1,last_event_id=NULL,answer_count=? WHERE id=?',
       ).bind(previous?.answerCount ?? s.answer_count, s.id),
       c.env.DB.prepare('DELETE FROM practice_guards'),
     ]);

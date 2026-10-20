@@ -259,7 +259,7 @@ app.get('/api/export', async c => {
     decks: decks.results.map(r => json(String(r.data))), noteTypes: types.results.map(r => json(String(r.data))),
     notes: notes.results.map(r => json(String(r.data))), cards: cards.results.map(r => ({ ...r, original: json(String(r.original)), schedule: json(String(r.schedule)) })),
     importedReviews: history.results.map(r => json(String(r.data))), reviewEvents: events.results, media: media.results, contentHistory: contentHistory.results,
-    practiceSessions: practiceSessions.results, practiceMembers: practiceMembers.results, practiceEvents: practiceEvents.results, practiceReceipts: practiceReceipts.results,
+    practiceSessions: practiceSessions.results.map(({state_revision,...s})=>({...s,revision:state_revision??s.revision})), practiceMembers: practiceMembers.results, practiceEvents: practiceEvents.results, practiceReceipts: practiceReceipts.results,
     studyExtras: studyExtras.results, studyRestarts: studyRestarts.results, studyRestartMembers: studyMembers.results,
     studyReceipts: studyReceipts.results, studyPreviews: studyPreviews.results, studyGeneration: studyGeneration.results });
 });

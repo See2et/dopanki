@@ -1,3 +1,7 @@
+-- Fence legacy mutation batches before changing the meaning of member state.
+-- Legacy updates use revision; their whole batch must fail after cutover.
+ALTER TABLE practice_sessions RENAME COLUMN revision TO state_revision;
+
 -- Short-term custom-practice repetition is separate from cards / regular FSRS.
 ALTER TABLE practice_sessions ADD COLUMN answer_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE practice_members ADD COLUMN completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0,1));
