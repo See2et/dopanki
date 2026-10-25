@@ -62,6 +62,27 @@ it('introduces new notes in addition order, with template order and the same dai
   const cached=(await studyCandidates(ctx,'1'))!;
   expect(cached.row?.id).toBe('91');expect(cached.candidateIds).toEqual(['91','11']);
   expect(cached.counts.new).toBe(2);
+  const reordered=await post('/api/manage/notes/bulk',{requestId:'reorder-first-introductions-0001',items:[{operation:'update',id:'10',version:1,sortOrder:0}]});
+  expect(reordered.results[0].note.sortOrder).toBe(0);
+  for(const path of ['/api/study/1','/api/study/1?focusIds=21,81,11,91']){
+    const response=await get(path);expect(response.card.id).toBe('81');expect(response.candidateIds).toEqual(['81','91']);expect(response.counts.new).toBe(2);
+  }
+  const reorderedCtx=(await studyContext(db as unknown as D1Database,now))!;await preloadOverviewCandidates(reorderedCtx);
+  expect((await studyCandidates(reorderedCtx,'1'))!.candidateIds).toEqual(['81','91']);
+  expect(db.sqlite.prepare('SELECT * FROM cards ORDER BY id').all()).toEqual(before);
+});
+
+it('keeps scheduled learning priority and due order despite explicit note reordering',async()=>{
+  const d=doc(2,0,3);d.decks[0].config.newPerDay=10;d.decks[0].config.reviewPerDay=10;
+  d.notes=d.cards.map(c=>({...d.notes[0],id:c.id}));d.cards.forEach(c=>c.noteId=c.id);
+  d.cards[0].dueAt=now-2000;d.cards[1].dueAt=now-1000;
+  for(const [i,due] of [[2,now-2000],[3,now-1000]]){
+    const c=d.cards[i];c.queue=1;c.type=1;c.dueAt=due;c.lastReview=now-60000;c.reps=1;
+  }
+  seed(d);const before=db.sqlite.prepare('SELECT * FROM cards ORDER BY id').all();
+  const result=await post('/api/manage/notes/bulk',{requestId:'reorder-scheduled-notes-0001',items:['5','2','1','4','3'].map((id,sortOrder)=>({operation:'update',id,version:1,sortOrder}))});
+  expect(result.results.every((r:any)=>r.ok)).toBe(true);
+  const response=await get('/api/study/1');expect(response.card.id).toBe('3');expect(response.candidateIds).toEqual(['3','4','1','2','5']);
   expect(db.sqlite.prepare('SELECT * FROM cards ORDER BY id').all()).toEqual(before);
 });
 

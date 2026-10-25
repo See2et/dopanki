@@ -16,6 +16,70 @@ const definition={name:'言語',fieldDefinitions:[{id:'prompt',name:'問題',req
 beforeEach(()=>{db=new TestDb();for(const f of ['0001_initial.sql','0002_history_time.sql','0003_authoring.sql','0004_custom_practice.sql','0005_practice_deletion.sql','0006_study_options.sql','0007_restart_new_limit.sql','0008_read_reduction.sql','0009_note_card_index.sql'])db.sqlite.exec(readFileSync(`migrations/${f}`,'utf8'));db.sqlite.exec(importStatements(fixture()).join(';')+';');});
 afterEach(()=>db.sqlite.close());
 describe('authoring through the shared API',()=>{
+ it('orders first introductions and material pages with explicit ranks, preserving cards and invalidating previews',async()=>{
+  const generation=()=>Number(db.sqlite.prepare('SELECT revision FROM study_generation').get()?.revision);
+  const {note:legacy}=await (await manage('/notes',{noteTypeId:'1',deckId:'1',fields:{JP:'first',KR:'one'}})).json() as any;
+  expect(legacy).not.toHaveProperty('sortOrder');
+  const {note:ranked}=await (await manage('/notes',{noteTypeId:'1',deckId:'1',fields:{JP:'second',KR:'two'},sortOrder:0})).json() as any;
+  expect(ranked.sortOrder).toBe(0);
+  const list=async()=>((await (await manage('/notes?limit=1')).json()) as any).notes[0].id;
+  const study=async()=>await (await req(`/api/study/1?focusIds=${legacy.cards[0].id},${ranked.cards[0].id}`)).json() as any;
+  expect(await list()).toBe(ranked.id);expect((await study()).card.id).toBe(ranked.cards[0].id);
+  expect((await req('/api/review',{eventId:'ordering-preserves-review-0001',cardId:'1',revision:0,rating:3})).status).toBe(200);
+  const cards=db.sqlite.prepare('SELECT * FROM cards ORDER BY id').all();
+  const reviews=db.sqlite.prepare('SELECT * FROM review_events').all();const imported=db.sqlite.prepare('SELECT * FROM imported_reviews').all();
+  const setup={dailyReviewLimit:2,backlogPerDay:2,flatten:true};
+  const preview=await (await req('/api/study-options/1/restart/preview',setup)).json() as any;
+  const before=generation();const patch={requestId:key(),version:1,sortOrder:10};
+  const changed=await (await manage(`/notes/${ranked.id}`,patch,'PATCH')).json() as any;
+  expect(changed.note.sortOrder).toBe(10);expect(generation()).toBe(before+1);
+  expect(await (await manage(`/notes/${ranked.id}`)).json()).toEqual(changed);
+  expect(await (await manage(`/notes/${ranked.id}`,patch,'PATCH')).json()).toEqual(changed);expect(generation()).toBe(before+1);
+  expect((await manage(`/notes/${ranked.id}`,{...patch,sortOrder:11},'PATCH')).status).toBe(409);
+  expect((await manage(`/notes/${ranked.id}`,{version:1,sortOrder:0},'PATCH')).status).toBe(409);
+  expect((await req('/api/study-options/1/restart',{...setup,previewToken:preview.token,requestId:key()})).status).toBe(409);
+  expect(await list()).toBe('1');expect((await study()).candidateIds).toEqual([legacy.cards[0].id,ranked.cards[0].id]);
+  const omitted=await (await manage(`/notes/${ranked.id}`,{version:2,tags:['kept']},'PATCH')).json() as any;
+  expect(omitted.note.sortOrder).toBe(10);expect(generation()).toBe(before+1);
+  await manage(`/notes/${ranked.id}`,{version:3,sortOrder:10},'PATCH');expect(generation()).toBe(before+1);
+  const reset=await (await manage(`/notes/${ranked.id}`,{version:4,sortOrder:null},'PATCH')).json() as any;
+  expect(reset.note.sortOrder).toBeNull();expect(generation()).toBe(before+2);
+  const raw=JSON.parse(String(db.sqlite.prepare('SELECT data FROM notes WHERE id=?').get(ranked.id)?.data));expect(raw.sortOrder).toBeNull();
+  expect((await study()).candidateIds).toEqual([legacy.cards[0].id,ranked.cards[0].id]);
+  expect(db.sqlite.prepare('SELECT * FROM cards ORDER BY id').all()).toEqual(cards);
+  expect(db.sqlite.prepare('SELECT * FROM review_events').all()).toEqual(reviews);expect(db.sqlite.prepare('SELECT * FROM imported_reviews').all()).toEqual(imported);
+  const history=db.sqlite.prepare("SELECT before_data,after_data FROM content_history WHERE entity_id=? ORDER BY rowid").all(ranked.id);
+  expect(JSON.parse(String(history[1].before_data)).sortOrder).toBe(0);expect(JSON.parse(String(history[1].after_data)).sortOrder).toBe(10);
+ });
+ it('bulk creates, edits and resets ranks once per transaction with per-item errors and retry safety',async()=>{
+  const generation=()=>Number(db.sqlite.prepare('SELECT revision FROM study_generation').get()?.revision);
+  const before=generation();const card=db.sqlite.prepare('SELECT * FROM cards').all();
+  const create={requestId:key(),items:[{operation:'create',noteTypeId:'1',deckId:'1',fields:{JP:'rank',KR:'rank'},sortOrder:0},{operation:'update',id:'1',version:1,sortOrder:20},{operation:'update',id:'1',version:1,sortOrder:5},{operation:'update',id:'1',version:2,sortOrder:-1}]};
+  const first=await (await manage('/notes/bulk',create)).json() as any;
+  expect(first.results.map((r:any)=>r.ok)).toEqual([true,true,false,false]);expect(first.results[2].status).toBe(409);expect(first.results[3].status).toBe(400);
+  expect(first.results[0].note.sortOrder).toBe(0);expect(first.results[1].note.sortOrder).toBe(20);
+  expect(generation()).toBe(before+2); // One inserted card trigger, one explicit ordering invalidation.
+  expect(await (await manage('/notes/bulk',create)).json()).toEqual(first);expect(generation()).toBe(before+2);
+  const added=first.results[0].note;const current=generation();
+  const reset={requestId:key(),items:[{operation:'update',id:added.id,version:1,sortOrder:null},{operation:'update',id:'1',version:2,sortOrder:null},{operation:'update',id:added.id,version:2,tags:['preserved']}]};
+  const result=await (await manage('/notes/bulk',reset)).json() as any;
+  expect(result.results.every((r:any)=>r.ok)).toBe(true);expect(result.results.map((r:any)=>r.note.sortOrder)).toEqual([null,null,null]);expect(generation()).toBe(current+1);
+  expect(await (await manage('/notes/bulk',reset)).json()).toEqual(result);expect(generation()).toBe(current+1);
+  expect(db.sqlite.prepare("SELECT * FROM cards WHERE id='1'").all()).toEqual(card);
+  expect((await (await manage('/notes')).json() as any).notes.map((n:any)=>n.id)).toEqual(['1',added.id]);
+ });
+ it('rejects invalid ranks on single and bulk create/update without mutating notes or generation',async()=>{
+  const before=db.sqlite.prepare('SELECT * FROM notes').all();const generation=db.sqlite.prepare('SELECT * FROM study_generation').get();
+  for(const sortOrder of [-1,1.5,Number.MAX_SAFE_INTEGER+1,'2']){
+   const create={operation:'create',noteTypeId:'1',deckId:'1',fields:{JP:'bad',KR:'bad'},sortOrder};
+   const update={operation:'update',id:'1',version:1,sortOrder};
+   expect((await manage('/notes',create)).status).toBe(400);expect((await manage('/notes/1',update,'PATCH')).status).toBe(400);
+   const bulk=await (await manage('/notes/bulk',{items:[create,update]})).json() as any;
+   expect(bulk.results.map((r:any)=>[r.ok,r.status])).toEqual([[false,400],[false,400]]);
+  }
+  expect(db.sqlite.prepare('SELECT * FROM notes').all()).toEqual(before);expect(db.sqlite.prepare('SELECT * FROM study_generation').get()).toEqual(generation);
+  expect(db.sqlite.prepare('SELECT COUNT(*) AS n FROM content_history').get()?.n).toBe(0);
+ });
  it.each(['field','template'])('guards %s removal against concurrent first-note creation',async(kind)=>{
   db.sqlite.exec('DELETE FROM review_events;DELETE FROM imported_reviews;DELETE FROM cards;DELETE FROM notes');
   const d=fixture();d.noteTypes[0].templates.push({name:'second',front:'{{JP}}',back:'{{KR}}'});d.cards[0].ordinal=1;

@@ -18,6 +18,13 @@ const timestamp = () => new Date().toISOString();
 const digest = async (v: string) => [...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(v)))].map(x=>x.toString(16).padStart(2,'0')).join('');
 const p = <T>(s:string) => JSON.parse(s) as T;
 const version = (v: unknown) => { requireValue(Number.isInteger(v) && Number(v)>0,'編集バージョンを指定してください。'); return Number(v); };
+function sortOrderFor(input:Record<string,unknown>):Pick<Note,'sortOrder'> {
+ if(!('sortOrder' in input))return {};
+ const value=input.sortOrder;requireValue(value===null||(Number.isSafeInteger(value)&&Number(value)>=0),'sortOrderは0以上の安全な整数またはnullで指定してください。');
+ return {sortOrder:value as number|null};
+}
+const orderChanged=(before:Note|null,after:Note)=>(before?.sortOrder??null)!==(after.sortOrder??null);
+const invalidateStudy=(db:D1Database)=>db.prepare('UPDATE study_generation SET revision=revision+1 WHERE id=1');
 export function managedType(raw: NoteType, v=1): ManagedNoteType {
  const extra=raw as Partial<ManagedNoteType>;
  return {...raw,version:v,fieldDefinitions:raw.fields.map((n,i)=>({id:extra.fieldDefinitions?.[i]?.id??`field-${i}`,name:n,required:extra.fieldDefinitions?.[i]?.required??false})),templates:raw.templates.map((t,i)=>({...t,id:(t as {id?:string}).id??`template-${i}`}))};
@@ -39,7 +46,7 @@ const noteSelect = `SELECT notes.data,notes.content_version,note_types.data AS t
 function noteFromRow(r:NoteRow):ManagedNote {
  const n=p<Note>(r.data);const t=managedType(p<NoteType>(r.type_data),r.type_version);
  const cards=p<{id:string;deckId:string;ordinal:number;queue:number}[]>(r.card_data);
- return {id:n.id,noteTypeId:n.noteTypeId,fields:Object.fromEntries(t.fields.map((f,i)=>[f,n.fields[i]??''])),tags:n.tags,version:r.content_version,contentFormat:n.contentFormat??'html',cards:cards.map(c=>({id:c.id,deckId:c.deckId,templateId:t.templates[t.kind==='cloze'?0:c.ordinal]?.id??'',suspended:c.queue===-1}))};
+ return {...('sortOrder' in n?{sortOrder:n.sortOrder}:{}),id:n.id,noteTypeId:n.noteTypeId,fields:Object.fromEntries(t.fields.map((f,i)=>[f,n.fields[i]??''])),tags:n.tags,version:r.content_version,contentFormat:n.contentFormat??'html',cards:cards.map(c=>({id:c.id,deckId:c.deckId,templateId:t.templates[t.kind==='cloze'?0:c.ordinal]?.id??'',suspended:c.queue===-1}))};
 }
 async function getNote(db:D1Database,noteId:string):Promise<ManagedNote> {
  const r=await db.prepare(`${noteSelect} WHERE notes.id=?`).bind(noteId).first<NoteRow>();
@@ -208,18 +215,20 @@ manager.get('/notes',async c=>{
  if(deckId){conditions.push('EXISTS(SELECT 1 FROM cards WHERE note_id=notes.id AND deck_id=? LIMIT 1)');args.push(deckId);}
  // Page and exact count use the same qualified predicates and bound values.
  const where=conditions.length?` WHERE ${conditions.join(' AND ')}`:'';
- // Existing notes retain insertion order in rowid; content edits only UPDATE them.
- const rows=await c.env.DB.prepare(`${noteSelect}${where} ORDER BY notes.rowid LIMIT ? OFFSET ?`).bind(...args,limit,offset).all<NoteRow>();
+ // Explicit authoring ranks override insertion order; unranked notes retain rowid order.
+ const rows=await c.env.DB.prepare(`${noteSelect}${where} ORDER BY COALESCE(json_extract(notes.data,'$.sortOrder'),notes.rowid),notes.rowid LIMIT ? OFFSET ?`).bind(...args,limit,offset).all<NoteRow>();
  const total=await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM notes${where}`).bind(...args).first<{n:number}>();
  return c.json({notes:rows.results.map(noteFromRow),total:total?.n??0});
 });
 manager.get('/notes/:id',async c=>c.json({note:await getNote(c.env.DB,c.req.param('id'))}));
 async function buildNote(c:C,body:Record<string,unknown>) {
  const t=await getType(c.env.DB,text(body.noteTypeId,'ノートタイプID'));requireValue(t.kind==='normal','穴埋め教材の新規作成は未対応です。');
- const deck=await getDeck(c.env.DB,text(body.deckId,'デッキID'));const fields=fieldsFor(t,body.fields);const n:Note={id:id(),guid:crypto.randomUUID(),noteTypeId:t.id,fields,tags:tagsFor(body.tags??[]),contentFormat:'plain'};
+ const deck=await getDeck(c.env.DB,text(body.deckId,'デッキID'));const fields=fieldsFor(t,body.fields);const n:Note={id:id(),guid:crypto.randomUUID(),noteTypeId:t.id,fields,tags:tagsFor(body.tags??[]),contentFormat:'plain',...sortOrderFor(body)};
  const cards=t.templates.map((template,i)=>({...newCard(c.env.DB,n.id,deck.id,i),templateId:template.id}));
- const note:ManagedNote={id:n.id,noteTypeId:t.id,fields:Object.fromEntries(t.fields.map((f,i)=>[f,fields[i]])),tags:n.tags,version:1,contentFormat:'plain',cards:cards.map(card=>({id:card.id,deckId:deck.id,templateId:card.templateId,suspended:false}))};
- const statements=[guard(c.env.DB,'EXISTS(SELECT 1 FROM collections)'),existingGuard(c.env.DB,'note_types',t.id,t.version),existingGuard(c.env.DB,'decks',deck.id,deck.version),c.env.DB.prepare('INSERT INTO notes(id,data) VALUES(?,?)').bind(n.id,JSON.stringify(n)),...cards.map(x=>x.statement),history(c.env.DB,'note',n.id,null,n,c.get('actor')??'session')];return {result:{note},statements};
+ const note:ManagedNote={...('sortOrder' in n?{sortOrder:n.sortOrder}:{}),id:n.id,noteTypeId:t.id,fields:Object.fromEntries(t.fields.map((f,i)=>[f,fields[i]])),tags:n.tags,version:1,contentFormat:'plain',cards:cards.map(card=>({id:card.id,deckId:deck.id,templateId:card.templateId,suspended:false}))};
+ const statements=[guard(c.env.DB,'EXISTS(SELECT 1 FROM collections)'),existingGuard(c.env.DB,'note_types',t.id,t.version),existingGuard(c.env.DB,'decks',deck.id,deck.version),c.env.DB.prepare('INSERT INTO notes(id,data) VALUES(?,?)').bind(n.id,JSON.stringify(n)),...cards.map(x=>x.statement),history(c.env.DB,'note',n.id,null,n,c.get('actor')??'session')];
+ if(orderChanged(null,n))statements.push(invalidateStudy(c.env.DB));
+ return {result:{note},statements};
 }
 async function patchNote(c:C,noteId:string,body:Record<string,unknown>){
  requireValue(!('noteTypeId' in body),'編集ではノートタイプを変更できません。');
@@ -228,11 +237,12 @@ async function patchNote(c:C,noteId:string,body:Record<string,unknown>){
  const t=managedType(p<NoteType>(joined.type_data),joined.type_version);const raw=p<Note>(joined.data);
  // Imported HTML is kept unless explicitly converted; native notes always render as escaped text.
  const fields=fieldsFor(t,body.fields??{},raw.fields);const tags=body.tags===undefined?raw.tags:tagsFor(body.tags);
- const next={...raw,fields,tags};const statements=[existingGuard(c.env.DB,'notes',noteId,old.version),existingGuard(c.env.DB,'note_types',t.id,t.version),c.env.DB.prepare('UPDATE notes SET data=?,content_version=content_version+1 WHERE id=?').bind(JSON.stringify(next),noteId)];
+ const order=sortOrderFor(body);const next={...raw,...order,fields,tags};const statements=[existingGuard(c.env.DB,'notes',noteId,old.version),existingGuard(c.env.DB,'note_types',t.id,t.version),c.env.DB.prepare('UPDATE notes SET data=?,content_version=content_version+1 WHERE id=?').bind(JSON.stringify(next),noteId)];
  let deck:ManagedDeck|undefined;if(body.deckId!==undefined){deck=await getDeck(c.env.DB,text(body.deckId,'デッキID'));statements.push(existingGuard(c.env.DB,'decks',deck.id,deck.version),c.env.DB.prepare('UPDATE cards SET deck_id=? WHERE note_id=?').bind(deck.id,noteId));}
  if(body.suspended!==undefined){requireValue(typeof body.suspended==='boolean','出題停止の指定が不正です。');statements.push(body.suspended?c.env.DB.prepare('UPDATE cards SET suspended_queue=queue,queue=-1 WHERE note_id=? AND queue<>-1').bind(noteId):c.env.DB.prepare('UPDATE cards SET queue=COALESCE(suspended_queue,CASE WHEN state=0 THEN 0 WHEN state=2 THEN 2 ELSE 1 END),suspended_queue=NULL WHERE note_id=? AND queue=-1').bind(noteId));}
  statements.push(history(c.env.DB,'note',noteId,raw,next,c.get('actor')??'session'));
- const note:ManagedNote={...old,version:old.version+1,fields:Object.fromEntries(t.fields.map((f,i)=>[f,fields[i]])),tags,cards:old.cards.map(card=>({...card,deckId:deck?.id??card.deckId,suspended:typeof body.suspended==='boolean'?body.suspended:card.suspended}))};
+ if(orderChanged(raw,next))statements.push(invalidateStudy(c.env.DB));
+ const note:ManagedNote={...old,...order,version:old.version+1,fields:Object.fromEntries(t.fields.map((f,i)=>[f,fields[i]])),tags,cards:old.cards.map(card=>({...card,deckId:deck?.id??card.deckId,suspended:typeof body.suspended==='boolean'?body.suspended:card.suspended}))};
  return {result:{note},statements};
 }
 manager.post('/notes',async c=>{const body=c.get('input');return c.json(await mutate(c,body,()=>buildNote(c,body)));});
@@ -258,7 +268,7 @@ manager.post('/notes/bulk',async c=>{
  const deckRows=await c.env.DB.prepare('SELECT id,data,content_version FROM decks WHERE id IN (SELECT value FROM json_each(?))').bind(JSON.stringify(deckIds)).all<{id:string;data:string;content_version:number}>();
  const deckMap=new Map(deckRows.results.map(r=>[r.id,{...p<Deck>(r.data),version:r.content_version}]));
  const results:({index:number;ok:true;note:ManagedNote}|{index:number;ok:false;status:number;error:string})[]=[];
- const receipts:Receipt[]=[];const inserts:{id:string;data:string;version:number}[]=[];
+ const receipts:Receipt[]=[];const inserts:{id:string;data:string;version:number}[]=[];let orderingChanged=false;
  const updates=new Map<string,{id:string;data:string;version:number}>();
  const cards:ReturnType<typeof cardRecord>[]=[];
  const cardChanges=new Map<string,{noteId:string;deckId?:string;suspended?:boolean}>();
@@ -279,20 +289,21 @@ manager.post('/notes/bulk',async c=>{
     const typeId=text(item.noteTypeId,'ノートタイプID');const found=typeMap.get(typeId);if(!found)throw new DomainError('ノートタイプが見つかりません。',404);t=found;
     requireValue(t.kind==='normal','穴埋め教材の新規作成は未対応です。');
     referencedDeck=deckMap.get(text(item.deckId,'デッキID'));if(!referencedDeck)throw new DomainError('デッキが見つかりません。',404);
-    const fields=fieldsFor(t,item.fields);raw={id:id(),guid:crypto.randomUUID(),noteTypeId:t.id,fields,tags:tagsFor(item.tags??[]),contentFormat:'plain'};next=raw;
+    const fields=fieldsFor(t,item.fields);raw={id:id(),guid:crypto.randomUUID(),noteTypeId:t.id,fields,tags:tagsFor(item.tags??[]),contentFormat:'plain',...sortOrderFor(item)};next=raw;
     pendingCards=t.templates.map((_,ordinal)=>cardRecord(raw.id,referencedDeck!.id,ordinal));
-    note={id:raw.id,noteTypeId:t.id,fields:Object.fromEntries(t.fields.map((f,j)=>[f,fields[j]])),tags:raw.tags,version:1,contentFormat:'plain',cards:pendingCards.map((card,j)=>({id:card.id,deckId:card.deck_id,templateId:t.templates[j].id,suspended:false}))};
+    note={...('sortOrder' in raw?{sortOrder:raw.sortOrder}:{}),id:raw.id,noteTypeId:t.id,fields:Object.fromEntries(t.fields.map((f,j)=>[f,fields[j]])),tags:raw.tags,version:1,contentFormat:'plain',cards:pendingCards.map((card,j)=>({id:card.id,deckId:card.deck_id,templateId:t.templates[j].id,suspended:false}))};
    }else{
     requireValue(!('noteTypeId' in item),'編集ではノートタイプを変更できません。');const noteId=text(item.id,'教材ID');const row=noteMap.get(noteId);if(!row)throw new DomainError('教材が見つかりません。',404);
     const old=noteFromRow(row);if(version(item.version)!==old.version)throw new DomainError('編集バージョンが古いです。',409);
     t=managedType(p<NoteType>(row.type_data),row.type_version);raw=p<Note>(row.data);before=raw;
-    next={...raw,fields:fieldsFor(t,item.fields??{},raw.fields),tags:item.tags===undefined?raw.tags:tagsFor(item.tags)};
+    next={...raw,...sortOrderFor(item),fields:fieldsFor(t,item.fields??{},raw.fields),tags:item.tags===undefined?raw.tags:tagsFor(item.tags)};
     if(item.deckId!==undefined){referencedDeck=deckMap.get(text(item.deckId,'デッキID'));if(!referencedDeck)throw new DomainError('デッキが見つかりません。',404);}
     if(item.suspended!==undefined)requireValue(typeof item.suspended==='boolean','出題停止の指定が不正です。');
-    note={...old,version:old.version+1,fields:Object.fromEntries(t.fields.map((f,j)=>[f,next.fields[j]])),tags:next.tags,cards:old.cards.map(card=>({...card,deckId:referencedDeck?.id??card.deckId,suspended:typeof item.suspended==='boolean'?item.suspended:card.suspended}))};
+    note={...old,...('sortOrder' in next?{sortOrder:next.sortOrder}:{}),version:old.version+1,fields:Object.fromEntries(t.fields.map((f,j)=>[f,next.fields[j]])),tags:next.tags,cards:old.cards.map(card=>({...card,deckId:referencedDeck?.id??card.deckId,suspended:typeof item.suspended==='boolean'?item.suspended:card.suspended}))};
     if(referencedDeck||typeof item.suspended==='boolean')change={...(cardChanges.get(noteId)??{noteId}),...(referencedDeck?{deckId:referencedDeck.id}:{}),...(typeof item.suspended==='boolean'?{suspended:item.suspended}:{})};
    }
    // No plan is published until every validation for this item has succeeded.
+   orderingChanged ||= orderChanged(before,next);
    guardVersion('note_types',t.id,t.version);if(referencedDeck)guardVersion('decks',referencedDeck.id,referencedDeck.version);
    if(before){const row=noteMap.get(raw.id)!;if(!updates.has(raw.id))guardVersion('notes',raw.id,row.content_version);updates.set(raw.id,{id:raw.id,data:JSON.stringify(next),version:note.version});
     const priorCards=p<{id:string;deckId:string;ordinal:number;queue:number}[]>(row.card_data);
@@ -319,6 +330,7 @@ manager.post('/notes/bulk',async c=>{
   suspended_queue=CASE WHEN json_extract(j.value,'$.suspended')=1 AND queue<>-1 THEN queue WHEN json_extract(j.value,'$.suspended')=0 AND queue=-1 THEN NULL ELSE suspended_queue END,
   queue=CASE WHEN json_extract(j.value,'$.suspended')=1 THEN -1 WHEN json_extract(j.value,'$.suspended')=0 AND queue=-1 THEN COALESCE(suspended_queue,CASE WHEN state=0 THEN 0 WHEN state=2 THEN 2 ELSE 1 END) ELSE queue END
   FROM json_each(?) j WHERE cards.note_id=json_extract(j.value,'$.noteId')`).bind(encode([...cardChanges.values()])));
+ if(orderingChanged)statements.push(invalidateStudy(c.env.DB));
  statements.push(c.env.DB.prepare(`INSERT INTO content_history(id,entity,entity_id,before_data,after_data,actor,created_at) SELECT json_extract(value,'$.id'),'note',json_extract(value,'$.entity_id'),json_extract(value,'$.before_data'),json_extract(value,'$.after_data'),json_extract(value,'$.actor'),json_extract(value,'$.created_at') FROM json_each(?)`).bind(encode(histories)));
  statements.push(c.env.DB.prepare(`INSERT INTO mutation_receipts(id,request_hash,response) SELECT json_extract(value,'$.id'),json_extract(value,'$.request_hash'),json_extract(value,'$.response') FROM json_each(?)`).bind(encode(receipts)),c.env.DB.prepare('DELETE FROM content_guards'));
  try{await c.env.DB.batch(statements);}catch(e){

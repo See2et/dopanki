@@ -73,8 +73,8 @@
 |---|---|
 | GET `/notes?q=&deckId=&noteTypeId=&offset=0&limit=30` | `{notes:[...], total:数}`。limit上限100、deckIdは指定デッキ自身を対象とする |
 | GET `/notes/:id` | `{note: ...}` |
-| POST `/notes` | requestId、noteTypeId、deckId、fields、任意のtags → `{note: ...}` |
-| PATCH `/notes/:id` | requestId、version、任意のfields・tags・deckId・suspended → `{note: ...}` |
+| POST `/notes` | requestId、noteTypeId、deckId、fields、任意のtags・sortOrder → `{note: ...}` |
+| PATCH `/notes/:id` | requestId、version、任意のfields・tags・deckId・suspended・sortOrder → `{note: ...}` |
 | GET `/notes/:id/history` | `{history:[{id,before,after,actor,createdAt}]}`、直近100件 |
 | POST `/notes/bulk` | requestId、items → `{results:[...]}` |
 
@@ -91,6 +91,8 @@
 ```
 
 編集のfieldsは部分更新。指定しない項目は保持し、空文字を指定すれば空欄にする。未定義フィールドや必須項目の空欄は拒否。tagsを指定した場合は配列全体を置き換える。
+
+`sortOrder` は任意の0以上の安全な整数（最大9007199254740991）。一覧と未学習カードの初回出題に使い、`null` で追加順に戻す。未指定・nullのノートは追加時の内部番号を並び順に使い、一覧で同順位なら追加順とする。作成時に省略すると従来どおり値を保存せず、応答にも追加しない。編集時の省略は現在の値を保持する。一括操作でも同じ規則を使い、不正値は項目ごとに400を返す。順序の変更は保存と同じトランザクションで学習プレビューを無効にする（一括操作では1回）。既存カードのID・学習状態・履歴や、学習中・復習カードの優先度・期限による出題順は変えない。
 
 新規ノートはプレーンテキストとして保存し、HTML記号をエスケープして改行を表示する。既存のAnki由来ノートはHTML互換性を保持する。応答の `contentFormat` で区別できる。
 
